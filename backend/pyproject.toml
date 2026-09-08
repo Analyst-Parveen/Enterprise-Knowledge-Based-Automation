@@ -1,0 +1,62 @@
+[project]
+name = "ekba-backend"
+version = "0.2.0"
+description = "Enterprise Knowledge-Based Automation - backend"
+requires-python = ">=3.11"
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "redis>=5.2",
+    "qdrant-client>=1.12",
+    "boto3>=1.35",
+    "pyjwt[crypto]>=2.10",
+    "httpx>=0.28",
+    "python-multipart>=0.0.17",
+    # extractors
+    "pypdf>=5.1",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "pillow>=11.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "types-boto3",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "S", "ASYNC"]
+ignore = [
+    "S101",   # assert is fine in tests
+    "B008",   # FastAPI REQUIRES Depends()/File()/Form()/Query() in defaults
+    "UP042",  # (str, Enum) is deliberate: SQLAlchemy Enum columns and JSON
+              # serialization both rely on the str mixin behaving as a plain str.
+              # StrEnum changes __str__/__format__ semantics; not worth the churn.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,93 @@
+# ---------------------------------------------------------------------------
+# Secrets and credentials - see .claude/rules/secrets-management.md
+# Nothing in this section may ever be committed.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+credentials
+aws-credentials
+secrets.json
+.secrets/
+
+# ---------------------------------------------------------------------------
+# Terraform
+# ---------------------------------------------------------------------------
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+tfdestroyplan
+*.tfvars
+!*.tfvars.example
+.terraform/
+.terraform.lock.hcl.bak
+crash.log
+override.tf
+override.tf.json
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# ---------------------------------------------------------------------------
+# Node / Next.js
+# ---------------------------------------------------------------------------
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------------------
+# Playwright
+# ---------------------------------------------------------------------------
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+# ---------------------------------------------------------------------------
+# Local data - never commit uploaded documents or vector data
+# ---------------------------------------------------------------------------
+.data/
+uploads/
+qdrant_storage/
+postgres_data/
+
+# ---------------------------------------------------------------------------
+# Generated reports are kept, but drop local scratch
+# ---------------------------------------------------------------------------
+docs/reports/*.local.md
+scratch/
+tmp/
+
+# ---------------------------------------------------------------------------
+# OS / editor
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json
