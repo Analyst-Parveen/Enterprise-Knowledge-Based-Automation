@@ -8,7 +8,7 @@ See .claude/rules/tenant-isolation.md section 2.
 from __future__ import annotations
 
 from fastapi import APIRouter, Query
-from sqlalchemy import func, select
+from sqlalchemy import Integer, cast, func, select
 
 from app.api.deps import AdminUser, DbSession
 from app.db.models import (
@@ -36,7 +36,11 @@ async def metrics(ctx: AdminUser, session: DbSession) -> AdminMetricsResponse:
                 func.coalesce(func.sum(RequestUsage.estimated_cost), 0.0),
                 func.coalesce(func.avg(RequestUsage.latency_ms), 0.0),
                 func.coalesce(
-                    func.avg(func.cast(RequestUsage.cache_hit, func.INTEGER().type)), 0.0
+                    # cast(), not func.cast(): func.INTEGER() builds a SQL
+                    # function call whose .type is NullType, which fails to
+                    # compile. The cache hit rate is AVG over booleans as 0/1.
+                    func.avg(cast(RequestUsage.cache_hit, Integer)),
+                    0.0,
                 ),
             ).where(RequestUsage.tenant_id == ctx.tenant_id)
         )

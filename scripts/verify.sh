@@ -64,7 +64,7 @@ skip "PostgreSQL / Qdrant / Redis" "Phase 1"
 # ---------------------------------------------------------------------------
 step "Application"
 if command -v curl >/dev/null 2>&1; then
-  check "health endpoint (${API_URL}/health)" curl -fsS --max-time 10 "${API_URL}/health" || true
+  check "health endpoint (${API_URL}/api/v1/health)" curl -fsS --max-time 10 "${API_URL}/api/v1/health" || true
 else
   skip "health endpoint" "curl unavailable"
 fi

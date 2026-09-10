@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db.models import Department, DocumentStatus, JobStatus, Modality
+from app.services.agents.state import WorkflowType
 
 
 class ORMModel(BaseModel):
@@ -182,3 +183,45 @@ class AuditEventOut(ORMModel):
     correlation_id: str | None
     created_at: datetime
     details: dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# agentic workflows
+# ---------------------------------------------------------------------------
+class WorkflowInfo(BaseModel):
+    id: str
+    name: str
+    description: str
+
+
+class AgentRequest(BaseModel):
+    # No tenant_id here either - tenant comes from the JWT.
+    workflow: WorkflowType
+    question: str = Field(min_length=1, max_length=4000)
+    department: Department | None = None
+    document_ids: list[str] | None = Field(default=None, max_length=20)
+
+
+class AgentStepOut(BaseModel):
+    node: str
+    model_config = ConfigDict(extra="allow")
+
+
+class AgentResponseOut(BaseModel):
+    """Same envelope as chat, plus the workflow trace."""
+
+    answer: str
+    citations: list[CitationOut] = Field(default_factory=list)
+    retrieved_chunks: list[RetrievedChunkOut] = Field(default_factory=list)
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    workflow: str
+    model_used: str
+    input_tokens: int
+    output_tokens: int
+    estimated_cost: float
+    latency_ms: int
+    tenant_id: str
+    confidence: float
+    partial: bool = False
+    error: str | None = None
+    correlation_id: str

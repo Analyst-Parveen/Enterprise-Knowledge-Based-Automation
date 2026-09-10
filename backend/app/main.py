@@ -8,15 +8,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.api.v1 import admin, chat, documents, health
+from app.api.v1 import admin, agents, chat, documents, health
 from app.core.config import settings
 from app.core.exceptions import AppError, app_error_handler, unhandled_error_handler
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import (
     BodySizeLimitMiddleware,
     CorrelationIdMiddleware,
+    HealthAwareTrustedHostMiddleware,
     SecurityHeadersMiddleware,
 )
 from app.core.ratelimit import close_redis
@@ -74,7 +74,7 @@ app = FastAPI(
 # --------------------------------------------------------------------------
 # middleware (outermost first)
 # --------------------------------------------------------------------------
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_host_list)
+app.add_middleware(HealthAwareTrustedHostMiddleware, allowed_hosts=settings.trusted_host_list)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,  # explicit allow-list, never "*"
@@ -105,6 +105,7 @@ API_PREFIX = "/api/v1"
 app.include_router(health.router, prefix=API_PREFIX)
 app.include_router(documents.router, prefix=API_PREFIX)
 app.include_router(chat.router, prefix=API_PREFIX)
+app.include_router(agents.router, prefix=API_PREFIX)
 app.include_router(admin.router, prefix=API_PREFIX)
 
 

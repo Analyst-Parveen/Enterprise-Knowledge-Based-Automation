@@ -81,6 +81,64 @@ class TestSecurityHeaders:
         assert "<script>" not in response.headers["X-Correlation-ID"]
 
 
+class TestDocsRendering:
+    """The Swagger UI page must not be blanked by the API-wide CSP.
+
+    /docs is an HTML page that loads its JS and CSS from a CDN and runs an
+    inline bootstrap script. The API-wide `default-src 'none'` blocks all of
+    that, which renders a blank page with a 200 status - so a status-code check
+    alone does not catch it.
+    """
+
+    def test_docs_page_is_served(self, client: TestClient) -> None:
+        response = client.get("/docs")
+        assert response.status_code == 200
+        assert "swagger-ui" in response.text
+
+    def test_docs_csp_permits_the_swagger_assets(self, client: TestClient) -> None:
+        csp = client.get("/docs").headers["Content-Security-Policy"]
+        assert "cdn.jsdelivr.net" in csp, "Swagger UI assets would be blocked"
+        assert "script-src" in csp and "style-src" in csp
+        assert "'unsafe-inline'" in csp, "the inline bootstrap script would be blocked"
+
+    def test_openapi_is_reachable_from_the_docs_page(self, client: TestClient) -> None:
+        csp = client.get("/docs").headers["Content-Security-Policy"]
+        assert "connect-src 'self'" in csp, "the page could not fetch /openapi.json"
+
+    def test_api_routes_keep_the_strict_policy(self, client: TestClient) -> None:
+        """The relaxation is scoped to the docs pages only."""
+        csp = client.get("/api/v1/health").headers["Content-Security-Policy"]
+        assert csp.startswith("default-src 'none'")
+        assert "cdn.jsdelivr.net" not in csp
+        assert "unsafe-inline" not in csp
+
+    def test_docs_keep_the_other_security_headers(self, client: TestClient) -> None:
+        headers = client.get("/docs").headers
+        assert headers["X-Frame-Options"] == "DENY"
+        assert headers["X-Content-Type-Options"] == "nosniff"
+
+
+class TestLoadBalancerHostHeader:
+    """An ALB health check sends the target's private IP as Host.
+
+    Without the liveness exemption every target reports unhealthy and no
+    blue-green deployment can ever shift traffic.
+    """
+
+    def test_health_check_with_task_ip_host_passes(self, client: TestClient) -> None:
+        response = client.get("/api/v1/health", headers={"Host": "10.42.1.37:8000"})
+        assert response.status_code == 200
+
+    def test_other_paths_still_reject_unknown_hosts(self, client: TestClient) -> None:
+        response = client.get("/api/v1/me", headers={"Host": "10.42.1.37:8000"})
+        assert response.status_code == 400
+
+    def test_readiness_is_not_exempt(self, client: TestClient) -> None:
+        """Only liveness is exempt - readiness reveals component names."""
+        response = client.get("/api/v1/health/ready", headers={"Host": "evil.example.com"})
+        assert response.status_code == 400
+
+
 class TestAuthentication:
     def test_unauthenticated_rejected(self, client: TestClient) -> None:
         assert client.get("/api/v1/me").status_code == 401

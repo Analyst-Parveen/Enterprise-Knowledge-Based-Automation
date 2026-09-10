@@ -4,13 +4,14 @@ A multimodal enterprise RAG and agentic automation platform — a private compan
 knowledge assistant with tenant-aware retrieval, LangGraph workflows, and a
 cost-conscious ephemeral AWS deployment.
 
-> **Status:** foundation only. Structure, rules, skills, and lifecycle scripts are
-> in place. Phase 0 implementation has not started.
+> **Status:** all six phases complete. 164 backend tests passing, frontend
+> building, Terraform validating. See [RUNBOOK.md](RUNBOOK.md) to run it.
 
 ## Documentation
 
 | Document | Purpose |
 |---|---|
+| **[RUNBOOK.md](RUNBOOK.md)** | **How to run it — start here.** Local setup, AWS deploy, blue-green explained |
 | [PROJECT.md](PROJECT.md) | Full requirements and architecture — the source of truth |
 | [CLAUDE.md](CLAUDE.md) | Working instructions and safety rules |
 | [.claude/rules/](.claude/rules/) | Binding constraints (security, terraform, tenancy, …) |
@@ -29,12 +30,21 @@ cost-conscious ephemeral AWS deployment.
 ## Getting started
 
 ```bash
-cp .env.example .env          # fill in placeholders; never commit .env
-docker compose -f infra/docker/docker-compose.yml up -d
+cp .env.example .env    # set POSTGRES_PASSWORD and DEV_AUTH_SECRET
+docker compose -f infra/docker/docker-compose.yml up -d postgres qdrant redis minio minio-init
+
+cd backend && python -m venv .venv && source .venv/Scripts/activate
+pip install -e ".[dev]"
+alembic upgrade head && python -m seeds.seed
+uvicorn app.main:app --reload          # http://localhost:8000/docs
+
+cd ../frontend && npm install && npm run dev    # http://localhost:3000
 ```
 
-Local development uses Docker Compose for PostgreSQL, Qdrant, and Redis, so
-day-to-day work costs nothing.
+Get a login token with `cd backend && python -m seeds.dev_token`.
+
+With `AI_PROVIDER=local` the entire stack runs offline with **no AWS account and
+no cost**. Full walkthrough in **[RUNBOOK.md](RUNBOOK.md)**.
 
 ## Lifecycle
 

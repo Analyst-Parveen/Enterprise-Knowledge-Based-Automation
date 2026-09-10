@@ -1,0 +1,61 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Light palette on :root; only the tokens are redefined for dark, so no
+   colour has its single definition inside a media query. */
+:root {
+  --bg: 250 250 249;
+  --surface: 255 255 255;
+  --border: 231 229 228;
+  --fg: 28 25 23;
+  --muted: 120 113 108;
+  --accent: 37 99 235;
+  --ok: 22 163 74;
+  --warn: 202 138 4;
+  --danger: 220 38 38;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: 12 12 14;
+    --surface: 24 24 27;
+    --border: 46 46 52;
+    --fg: 244 244 245;
+    --muted: 161 161 170;
+    --accent: 96 165 250;
+    --ok: 74 222 128;
+    --warn: 250 204 21;
+    --danger: 248 113 113;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: 12 12 14;
+  --surface: 24 24 27;
+  --border: 46 46 52;
+  --fg: 244 244 245;
+  --muted: 161 161 170;
+  --accent: 96 165 250;
+  --ok: 74 222 128;
+  --warn: 250 204 21;
+  --danger: 248 113 113;
+  color-scheme: dark;
+}
+
+html, body {
+  background-color: rgb(var(--bg));
+  color: rgb(var(--fg));
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+*:focus-visible {
+  outline: 2px solid rgb(var(--accent));
+  outline-offset: 2px;
+}

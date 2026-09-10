@@ -246,6 +246,8 @@ class LocalProvider:
     """
 
     _TOKEN_RE = re.compile(r"[a-z0-9]+")
+    # Matches the "[S1] Document.pdf (page 4)" headers built by prompts.build_context
+    _SOURCE_HEADER_RE = re.compile(r"^\[S(\d+)\]\s")
 
     def __init__(self) -> None:
         logger.warning(
@@ -265,7 +267,12 @@ class LocalProvider:
         max_tokens: int,
         temperature: float,
     ) -> ChatResult:
-        # Extractive: echo the most relevant lines of the provided context.
+        # Extractive: echo the most relevant lines of the provided context,
+        # tagged with the [Sn] marker of the source they were taken from.
+        #
+        # The marker is not decoration - this stub genuinely quotes that source
+        # verbatim, so citation validation maps it to a real retrieved chunk and
+        # the demo exercises the citation path rather than skipping it.
         last = messages[-1] if messages else {}
         text_blocks = [b.get("text", "") for b in last.get("content", []) if "text" in b]
         joined = "\n".join(text_blocks)
@@ -273,20 +280,31 @@ class LocalProvider:
         question = joined.split("QUESTION:")[-1].strip() if "QUESTION:" in joined else joined
         q_terms = set(self._TOKEN_RE.findall(question.lower()))
 
+        # Walk the SOURCES envelope, tracking which [Sn] block each line is under.
         context_part = joined.split("QUESTION:")[0]
-        lines = [ln.strip() for ln in context_part.splitlines() if len(ln.strip()) > 40]
-        scored = sorted(
-            lines,
-            key=lambda ln: len(q_terms & set(self._TOKEN_RE.findall(ln.lower()))),
-            reverse=True,
-        )
-        best = scored[:3]
+        current_source: int | None = None
+        candidates: list[tuple[int, str, int | None]] = []
 
-        answer = (
-            "Based on the retrieved context:\n\n" + "\n\n".join(best)
-            if best
-            else "I could not find that in your knowledge base."
-        )
+        for raw_line in context_part.splitlines():
+            line = raw_line.strip()
+            header = self._SOURCE_HEADER_RE.match(line)
+            if header:
+                current_source = int(header.group(1))
+                continue
+            if len(line) <= 40 or line.startswith("<<<"):
+                continue
+            overlap = len(q_terms & set(self._TOKEN_RE.findall(line.lower())))
+            candidates.append((overlap, line, current_source))
+
+        # Only quote lines that actually share a term with the question.
+        ranked = sorted(candidates, key=lambda c: c[0], reverse=True)
+        best = [c for c in ranked[:3] if c[0] > 0]
+
+        if best:
+            quoted = [f"{line} [S{source}]" if source else line for _overlap, line, source in best]
+            answer = "Based on the retrieved context:\n\n" + "\n\n".join(quoted)
+        else:
+            answer = "I could not find that in your knowledge base."
         in_tok = estimate_tokens(system + joined)
         out_tok = estimate_tokens(answer)
         return ChatResult(

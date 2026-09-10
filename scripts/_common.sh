@@ -22,6 +22,23 @@ export TF_DIR="${REPO_ROOT}/infra/terraform/envs/${ENVIRONMENT}"
 export REPORT_DIR="${REPO_ROOT}/docs/reports"
 export RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 
+# Windows: the AWS CLI installer does not always reach Git Bash's PATH.
+if ! command -v aws >/dev/null 2>&1 && [ -x "/c/Program Files/Amazon/AWSCLIV2/aws.exe" ]; then
+  export PATH="$PATH:/c/Program Files/Amazon/AWSCLIV2"
+fi
+
+# Default the AWS identity from the operator's own (git-ignored) baseline
+# tfvars, so the same values are not typed twice. An explicit export still wins,
+# and preflight_aws still refuses to run if the connected account differs.
+_BASELINE_TFVARS="${REPO_ROOT}/infra/terraform/envs/baseline/terraform.tfvars"
+_tfvar() {
+  [ -f "$_BASELINE_TFVARS" ] || return 0
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$_BASELINE_TFVARS" | head -1
+}
+export EXPECTED_AWS_ACCOUNT_ID="${EXPECTED_AWS_ACCOUNT_ID:-$(_tfvar expected_aws_account_id)}"
+export AWS_REGION="${AWS_REGION:-$(_tfvar aws_region)}"
+export EXPECTED_AWS_REGION="${EXPECTED_AWS_REGION:-${AWS_REGION}}"
+
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
@@ -84,15 +101,28 @@ preflight_terraform() {
   require_cmd terraform
   [ -d "$TF_DIR" ] || die "terraform environment directory not found: ${TF_DIR}"
 
-  terraform -chdir="$TF_DIR" init -input=false -backend=true >/dev/null \
+  [ -f "${TF_DIR}/backend.hcl" ] \
+    || die "no backend.hcl in ${TF_DIR} - run ./scripts/bootstrap-state.sh first"
+  terraform -chdir="$TF_DIR" init -input=false -backend-config=backend.hcl >/dev/null \
     || die "terraform init failed"
 
   local ws
   ws="$(terraform -chdir="$TF_DIR" workspace show)"
   ok "terraform workspace: ${ws}"
 
-  local count
-  count="$(terraform -chdir="$TF_DIR" state list 2>/dev/null | wc -l | tr -d ' ')"
+  # `terraform state list` exits 1 with "No state file was found!" before the
+  # first apply. Under `set -euo pipefail` that used to kill the script silently
+  # here, so a first deploy could never start. An empty state is expected and
+  # reported as 0; any OTHER failure is still fatal and shown.
+  local count state_out
+  if state_out="$(terraform -chdir="$TF_DIR" state list 2>&1)"; then
+    count="$(printf '%s\n' "$state_out" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+  elif printf '%s' "$state_out" | grep -q "No state file was found"; then
+    count=0
+  else
+    err "$state_out"
+    die "could not read terraform state for ${ENVIRONMENT}"
+  fi
   ok "terraform state holds ${count} resources for ${ENVIRONMENT}"
 }
 
