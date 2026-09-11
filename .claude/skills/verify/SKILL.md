@@ -18,6 +18,24 @@ pass.
 `terraform destroy` and `terraform apply` are both forbidden here. `terraform plan`
 is permitted only to detect drift.
 
+## What `verify.sh` actually checks today (2026-09-11)
+
+The steps below are the full target. The script currently runs the identity
+preflight, lists `ProjectCode=ekba` resources, and makes **one** real check:
+`curl -fsS --max-time 10 "$API_URL/api/v1/health"` from the operator's machine
+through the ALB. Everything else prints `SKIP … Phase N`. Cover the rest by hand
+when a real verification is asked for, and say which checks were manual.
+
+That one check depends on network reachability, not only on the app: the ALB
+admits only `allowed_cidrs` (one operator `/32`). A timeout (curl exit 28) with
+healthy ALB targets and `200`s in the API log from `10.42.x.x` means the
+operator IP changed — the app is fine. Report it as that, not as an application
+failure.
+
+`/api/v1/health` is liveness only (`components: []`). For the dependency check
+in Step 3, call `/api/v1/health/ready`: it reports Postgres, Redis and Qdrant and
+returns `503` if any is down.
+
 ## Step 1 — Identity and ownership
 
 ```bash
@@ -50,7 +68,7 @@ prefix + `ProjectCode=ekba` tag). Report anything ambiguous; touch nothing.
 
 ## Step 4 — Application
 
-- `/health` liveness and readiness return healthy.
+- `/api/v1/health` (liveness) and `/api/v1/health/ready` (readiness) return healthy.
 - Authentication rejects an unauthenticated request with 401.
 - Security headers present: HSTS, `X-Content-Type-Options`, `X-Frame-Options`,
   `Referrer-Policy`, CSP.
@@ -81,8 +99,10 @@ Check specifically:
 
 - CloudWatch log groups receiving structured logs with correlation IDs.
 - Metrics flowing for requests, latency, tokens, cost, cache hits, security events.
-- Alarms configured, including estimated spend.
-- Report currently running billable resources and their cost at rest.
+- Alarms configured. Estimated spend is covered by the cost-guard budgets — the
+  `EstimatedCharges` alarm exists only in `us-east-1` deployments.
+- Report currently running billable resources and their cost at rest, and
+  whether the cost guard is armed or in dry-run (`./scripts/cost-check.sh`).
 
 ## Step 7 — Report
 

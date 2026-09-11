@@ -1,0 +1,35 @@
+# AWS Amplify Hosting build spec for the Next.js frontend (a static export).
+#
+# The Amplify app itself - environment variables, security headers, the 404
+# rule, the branch - is managed by Terraform in infra/terraform/envs/frontend.
+# NEXT_PUBLIC_API_URL comes from there and is baked into the bundle at build
+# time, so it must be the HTTPS CloudFront URL in front of the API.
+version: 1
+applications:
+  - appRoot: frontend
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - nvm install 22 # match infra/docker/frontend.Dockerfile
+            - node --version
+            - npm ci --cache .npm --prefer-offline
+        build:
+          commands:
+            # Refuse to ship a bundle that points at localhost or a plain-HTTP
+            # API - an HTTPS page cannot call HTTP (mixed content).
+            - |
+              case "$NEXT_PUBLIC_API_URL" in
+                https://*) echo "API: $NEXT_PUBLIC_API_URL" ;;
+                *) echo "NEXT_PUBLIC_API_URL must be an https:// URL, got '$NEXT_PUBLIC_API_URL'"; exit 1 ;;
+              esac
+            - npm run lint
+            - npm run typecheck
+            - NEXT_OUTPUT_MODE=export npm run build
+      artifacts:
+        baseDirectory: out
+        files:
+          - "**/*"
+      cache:
+        paths:
+          - .npm/**/*

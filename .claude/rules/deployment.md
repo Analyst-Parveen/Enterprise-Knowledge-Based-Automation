@@ -107,3 +107,22 @@ Stop and ask the user before:
 - Applying a Terraform plan that destroys or replaces something unexpected.
 - Any manual out-of-band change to deployed infrastructure.
 - Any action that would leave expensive resources running after a demo.
+- Setting the cost guard's `dry_run` to `false`.
+
+## 10. Implementation status (2026-09-11)
+
+The requirements above stand. This is how far the implementation has got, so
+nobody mistakes a requirement for a working feature:
+
+| Requirement | Status |
+|---|---|
+| Blue-green via CodeDeploy, traffic shifts after health checks (§4) | **Working.** Two deployments succeeded. The gate is the ECS container health checks plus the ALB target-group check on `/api/v1/health` (liveness). |
+| Health checks cover DB, Qdrant, Redis and a RAG smoke query (§4) | **Not built.** The AppSpec has no lifecycle hooks. `/api/v1/health/ready` checks Postgres, Redis and Qdrant but nothing calls it during a deploy. |
+| Post-deploy `verify.sh` (§5) | **Partly.** Runs from the operator's machine; its only real check is `/api/v1/health` through the ALB. Other checks are placeholders. It depends on the operator IP being in `allowed_cidrs`. |
+| Post-deploy `seed.sh` and `test-e2e.sh` (§5) | **Deliberately not run by `deploy.sh`.** Both target the local stack; on AWS the task seeds itself at startup, because Postgres is a private sidecar. |
+| `rollback.sh` returns to the previous image via CodeDeploy (§6) | **Not built.** The script prints `CodeDeploy rollback not yet implemented`, re-runs `verify.sh`, and changes nothing. CodeDeploy auto-rollback (deployment failure, `ekba-dev-5xx` alarm) is configured but not yet exercised. |
+| CI pipeline (§3) | `deploy.yml` exists and has **not been run**. Its cost-guard step reads spend after credits and lacks `ce:GetCostAndUsage`; its health check cannot reach an ALB restricted to one operator IP. |
+| Account prerequisite | The account must be on the **Paid** plan. On the Free plan every CodeDeploy call returns `SubscriptionRequiredException`. |
+| Cost enforcement | `deploy.sh` refuses at $18 gross usage. The cost guard is applied **in dry-run**. |
+| Transport ([security.md](security.md) §3: HTTPS everywhere) | **Partly.** The ALB itself still serves only HTTP (`:80`, `:8080`). Browser traffic from the Amplify frontend goes through CloudFront over HTTPS (`envs/frontend`), and CloudFront reaches the ALB over HTTP. Implemented, not applied yet. |
+| Frontend deployment | `scripts/deploy-frontend.sh` (Amplify Hosting + CloudFront + backend wiring + verification) and `scripts/rollback-frontend.sh`. Implemented and dry-run tested (`--plan-only`); **not yet applied**. The one-time Amplify↔GitHub connection is a manual console step. |

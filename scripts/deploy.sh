@@ -63,15 +63,57 @@ ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 IMAGE="${REGISTRY}/${ECR_REPO}:${GIT_SHA}"
 
-aws ecr get-login-password --region "$AWS_REGION" \
-  | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null \
-  || die "ECR login failed"
+# The image is named after the commit, so it must contain exactly that commit.
+# Uncommitted changes to anything the Dockerfile copies would produce an image
+# whose tag lies about its contents - and, since tags are immutable, a later
+# clean deploy of the same SHA would then reuse that wrong image forever.
+IMAGE_INPUTS=(backend infra/docker/backend.Dockerfile)
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain -- "${IMAGE_INPUTS[@]}" 2>/dev/null)" ]; then
+  git -C "$REPO_ROOT" status --short -- "${IMAGE_INPUTS[@]}" | sed 's/^/    /'
+  die "uncommitted changes in the image inputs above - commit them first, so image ${GIT_SHA} contains exactly commit ${GIT_SHA}"
+fi
 
-# Immutable SHA tag. Never :latest.
-docker build -f "${REPO_ROOT}/infra/docker/backend.Dockerfile" -t "$IMAGE" "$REPO_ROOT" \
-  || die "image build failed"
-docker push "$IMAGE" || die "image push failed"
-ok "pushed ${IMAGE}"
+# ecr_image_digest REPO TAG - prints the digest when the tag exists, nothing when
+# it does not. Any other error (permissions, missing repository) is fatal.
+ecr_image_digest() {
+  local out
+  if out="$(aws ecr describe-images --repository-name "$1" --region "$AWS_REGION" \
+      --image-ids "imageTag=$2" --query 'imageDetails[0].imageDigest' --output text 2>&1)"; then
+    printf '%s' "$out"
+  elif printf '%s' "$out" | grep -q "ImageNotFoundException"; then
+    return 0
+  else
+    err "$out"
+    die "could not query ECR repository $1"
+  fi
+}
+
+# Idempotent: tags are IMMUTABLE, so an existing ${GIT_SHA} tag can only ever
+# point at the image that was pushed for this commit. Reuse it rather than
+# attempting an overwrite ECR will reject. The CVE gate below still runs on it.
+DIGEST="$(ecr_image_digest "$ECR_REPO" "$GIT_SHA")"
+if [ -n "$DIGEST" ]; then
+  ok "image ${GIT_SHA} already in ECR (${DIGEST}) - reusing it, not rebuilding"
+else
+  aws ecr get-login-password --region "$AWS_REGION" \
+    | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null \
+    || die "ECR login failed"
+
+  # Immutable SHA tag. Never :latest.
+  docker build -f "${REPO_ROOT}/infra/docker/backend.Dockerfile" -t "$IMAGE" "$REPO_ROOT" \
+    || die "image build failed"
+
+  if ! docker push "$IMAGE"; then
+    # Another run can push the same commit between our check and our push.
+    DIGEST="$(ecr_image_digest "$ECR_REPO" "$GIT_SHA")"
+    [ -n "$DIGEST" ] || die "image push failed"
+    warn "tag ${GIT_SHA} was pushed concurrently - using the image already in ECR"
+  fi
+
+  DIGEST="$(ecr_image_digest "$ECR_REPO" "$GIT_SHA")"
+  [ -n "$DIGEST" ] || die "pushed ${IMAGE} but ECR does not report it"
+  ok "image ${IMAGE} is in ECR (${DIGEST})"
+fi
 
 aws ecr wait image-scan-complete --repository-name "$ECR_REPO" \
   --image-id "imageTag=${GIT_SHA}" 2>/dev/null || true

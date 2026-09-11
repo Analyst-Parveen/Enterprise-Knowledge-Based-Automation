@@ -84,9 +84,10 @@ data "aws_secretsmanager_secret" "app" {
 module "network" {
   source = "../../modules/network"
 
-  name          = local.name
-  vpc_cidr      = var.vpc_cidr
-  allowed_cidrs = var.allowed_cidrs
+  name                      = local.name
+  vpc_cidr                  = var.vpc_cidr
+  allowed_cidrs             = var.allowed_cidrs
+  cloudfront_origin_ingress = var.cloudfront_origin_ingress
 }
 
 module "service" {
@@ -159,7 +160,9 @@ module "service" {
     # Dev auth is OFF on AWS. Cognito is the only accepted issuer.
     DEV_AUTH_ENABLED = "false"
 
-    CORS_ALLOWED_ORIGINS = var.cors_allowed_origins
+    # The Amplify frontend's origin is appended by scripts/deploy-frontend.sh
+    # (frontend.auto.tfvars), so every later deploy.sh keeps it.
+    CORS_ALLOWED_ORIGINS = var.amplify_origin == "" ? var.cors_allowed_origins : "${var.cors_allowed_origins},${var.amplify_origin}"
     TRUSTED_HOSTS        = var.trusted_hosts
 
     DAILY_COST_CEILING_USD = tostring(var.daily_cost_ceiling_usd)

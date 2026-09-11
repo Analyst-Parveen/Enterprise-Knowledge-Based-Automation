@@ -6,6 +6,13 @@ environment             = "dev"
 
 # Your own IP only. Terraform REFUSES 0.0.0.0/0 here.
 #   curl -s https://checkip.amazonaws.com
+# Home IPs change. When yours does, the ALB drops your requests and verify.sh
+# fails with a timeout even though the deployment is healthy - update this and
+# run ./scripts/deploy.sh (a one-resource, in-place security-group change).
+#
+# Do not set cloudfront_origin_ingress or amplify_origin here:
+# scripts/deploy-frontend.sh writes them to frontend.auto.tfvars (git-ignored),
+# which Terraform loads automatically.
 allowed_cidrs = ["203.0.113.7/32"]
 
 # From the baseline outputs.

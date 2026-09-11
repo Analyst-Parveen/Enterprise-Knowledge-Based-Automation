@@ -72,11 +72,16 @@ provider is required for the system to work.
 
 | Role | Model ID | Notes |
 |---|---|---|
-| Chat (primary) | `openai.gpt-oss-20b-1:0` | OpenAI open-weight, text-only, limited regions |
-| Chat (fallback) | `amazon.nova-lite-v1:0` | Cheaper, wider regional availability |
-| Vision / multimodal | `amazon.nova-lite-v1:0` | Native image **and** video understanding |
-| Embeddings | `amazon.titan-embed-text-v2:0` | 1024 dimensions, cheapest Bedrock embedding |
+| Chat (primary) | `us.amazon.nova-lite-v1:0` | Inference-profile ID — Nova cannot be invoked by bare ID |
+| Chat (fallback) | `us.amazon.nova-micro-v1:0` | Cheaper, **text-only** |
+| Vision / multimodal | `us.amazon.nova-lite-v1:0` | Native image **and** video understanding |
+| Embeddings | `amazon.titan-embed-text-v2:0` | 1024 dimensions, invoked directly (no prefix) |
 | Audio | Amazon Transcribe | Speech-to-text for audio, video, and voice input |
+
+The original plan put `openai.gpt-oss-20b-1:0` in the primary chat slot. It was
+replaced because `us-west-2` offered no `gpt-oss` models at the last check. See
+[ai-model-usage.md](.claude/rules/ai-model-usage.md) for the registry and the
+inference-profile rule.
 
 **Factual constraints that shaped this table:**
 
@@ -95,8 +100,10 @@ provider is required for the system to work.
 2. All model IDs are configuration (`.env` / Secrets Manager), never hardcoded.
    Swapping a model must not require a code change.
 3. Verify regional availability and current pricing in the target account before
-   depending on a model. If the primary chat model is unavailable in the region,
-   fall back to Nova Lite and record the fallback in `model_used`.
+   depending on a model — and its **quota**: a new account can show every Bedrock
+   inference quota as `0`, which is the case in this project's AWS account as of
+   2026-09-11. If the primary chat model is unavailable, fall back to the
+   configured fallback model and record the fallback in `model_used`.
 
 ### Infrastructure and delivery
 - AWS + Terraform
@@ -347,8 +354,12 @@ Push -> Test -> Security checks -> Build -> Docker -> Scan -> ECR
 
 ## 16. AWS cost strategy — $20 hard cap
 
-$140 of credit is available. **The spend target is $20 total, and $20 is treated
-as a hard ceiling, not a guideline.** Everything below follows from that.
+The account holds promotional credits ($158.99 remaining at the last check,
+2026-09-11) and is on the AWS **Paid** plan — the Free plan does not allow
+CodeDeploy. **The spend target is $20 total, and $20 is treated as a hard
+ceiling, not a guideline.** Spend is measured **gross of credits**: credits pay
+first, but a ceiling measured after credits would read $0 until they ran out.
+Everything below follows from that.
 
 ### The operating model
 
@@ -365,7 +376,7 @@ in minutes with freshly seeded data.
 | Environment | Where | Cost |
 |---|---|---|
 | **Local** — all day-to-day development | Docker Compose | **$0** |
-| **AWS demo** — deployed only when needed | ECS Fargate, ephemeral | ~$0.30 / session |
+| **AWS demo** — deployed only when needed | ECS Fargate, ephemeral | ~$0.09 / hour (~$0.37 per 4-hour session) |
 
 All development, testing, and iteration happens locally at zero cost. AWS is used
 only to prove the deployment story and run a live demo.
@@ -376,15 +387,18 @@ only to prove the deployment story and run a live demo.
 
 | Resource | Sizing | Approx. cost |
 |---|---|---|
-| Application Load Balancer | 1, single AZ pair | ~$0.023 / hr |
-| ECS Fargate task | 1 vCPU / 2 GB, all containers in one task | ~$0.049 / hr |
+| Application Load Balancer | 1, across two AZs | ~$0.023 / hr + LCUs |
+| ECS Fargate task | 1 vCPU / 3 GB, all four containers in one task | ~$0.054 / hr |
+| Public IPv4 addresses | 2 on the ALB, 1 on the task | ~$0.015 / hr |
 | S3 | documents | pennies |
 | Cognito | user pool | free tier |
 | CloudWatch Logs | 1-day retention | pennies |
 | Bedrock | per token | ~$0.01–0.05 / session |
 | Amazon Transcribe | per minute of audio | keep demo clips short |
 
-**A 4-hour demo session costs roughly $0.30.** That is ~60 sessions inside $20.
+**A 4-hour demo session costs roughly $0.37** (list-price estimate). That is
+about 48 sessions before the $18 automatic shutdown. The protected baseline adds
+about $1.70/month at rest, mostly four Secrets Manager secrets.
 
 **Never provisioned, at all:**
 
@@ -400,23 +414,32 @@ only to prove the deployment story and run a live demo.
 ### Data is deliberately ephemeral
 
 PostgreSQL, Qdrant, and Redis run as containers with no persistent volume. Their
-data is lost on destroy — **this is intended.** `seed.sh` rebuilds the demo
-dataset through the real ingestion pipeline on every deploy, so dashboards and
-retrieval are always populated with genuine chunks, embeddings, and citations.
+data is lost on destroy — **this is intended.** On AWS the API container itself
+rebuilds the demo dataset at every task start (`alembic upgrade head`, then
+`python -m seeds.seed`, through the real ingestion pipeline), so dashboards and
+retrieval are populated with genuine chunks, embeddings, and citations. A failed
+seed does not stop the API. `seed.sh` does the same for the local stack.
 
-Only S3 documents and Secrets Manager persist.
+Only the protected baseline persists: S3 documents, Secrets Manager, ECR images,
+Cognito, budgets and the audit log group.
 
 ### Enforcement
 
 1. An AWS Budget of **$20** is created as part of the protected baseline, with
-   alerts at 50% / 80% / 100%.
-2. `verify.sh` and `cost-check.sh` report current month-to-date spend and what is
-   running billable right now.
-3. `deploy.sh` refuses to deploy if month-to-date spend has crossed the configured
-   ceiling (`MAX_MONTHLY_SPEND_USD`).
-4. Every deploy prints an estimated hourly burn and a reminder to run
+   alerts at 50% / 80% / 100%. It uses the AWS default of including credits, so
+   it only alerts once spend reaches the card.
+2. The **cost guard** (`infra/terraform/envs/cost-guard`) measures gross usage.
+   It emails at $10 and $15, and stops the ephemeral stack — ECS scaled to zero,
+   ALB deleted — at $18 of gross usage, on any charge credits did not cover, or
+   when the stack is older than 8 hours. Applied 2026-09-11, **in dry-run** until
+   explicitly armed.
+3. `cost-check.sh` reports gross usage, credits applied, net spend, what is
+   running billable right now, and whether the kill switch is armed.
+4. `deploy.sh` refuses to deploy once gross usage since `COST_GUARD_START`
+   reaches `COST_GUARD_SHUTDOWN_USD` ($18).
+5. Every deploy prints an estimated hourly burn and a reminder to run
    `destroy.sh`.
-5. Adding any new AWS resource requires stating its cost at rest. If it cannot be
+6. Adding any new AWS resource requires stating its cost at rest. If it cannot be
    justified inside $20, it does not go in.
 
 ---
@@ -427,8 +450,9 @@ Reproducibility is mandatory. Lifecycle entrypoints in [scripts/](scripts/):
 
 | Script | Responsibility |
 |---|---|
-| `deploy.sh` | Create/update infrastructure, deploy application, verify, test |
+| `deploy.sh` | Create/update infrastructure, deploy application, verify |
 | `verify.sh` | Verify AWS infrastructure, services, application, AI pipeline |
+| `cost-check.sh` | Report gross/net spend, billable resources, and cost-guard state |
 | `test-e2e.sh` | Run complete end-to-end tests |
 | `seed.sh` | Seed development/demo data |
 | `rollback.sh` | Safely roll back the application |
@@ -512,13 +536,20 @@ through Transcribe into the existing pipeline. Seeded demo data. Playwright E2E.
 
 ---
 
-### Phase 5 — AWS · the only phase that spends · ~$0.30 per session
+### Phase 5 — AWS · the only phase that spends · ~$0.37 per session
 Terraform for the ephemeral stack (ALB, ECS Fargate, ECR, S3, Cognito,
 CloudWatch, IAM, Budget). GitHub Actions with OIDC. CodeDeploy blue-green.
 CloudWatch metrics and alarms, LangSmith tracing. The lifecycle scripts fully
 wired. First real `deploy -> verify -> seed -> e2e -> demo -> destroy` cycle.
 
 **Exit:** the full cycle runs twice, proving reproducibility, for under $1 total.
+
+**Status (2026-09-11) — in progress, exit not yet met.** Done: baseline and
+`dev` stack applied; two CodeDeploy blue-green deployments succeeded and
+`verify.sh` passed on the second; cost guard applied in dry-run. Not yet done:
+a `destroy -> deploy` cycle; `rollback.sh` traffic shift; the GitHub Actions
+deploy workflow; Bedrock on AWS (quotas are 0); `verify.sh` checks beyond
+liveness.
 
 ---
 

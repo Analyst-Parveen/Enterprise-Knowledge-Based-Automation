@@ -18,3 +18,15 @@ variable "allowed_cidrs" {
     error_message = "Refusing to expose the demo ALB to the entire internet. Set DEMO_ALLOWED_CIDR to your own IP."
   }
 }
+
+variable "cloudfront_origin_ingress" {
+  description = <<-EOT
+    Also admit HTTP on port 80 from CloudFront's origin-facing IP ranges, so the
+    CloudFront distribution in envs/frontend can reach the ALB. This makes the API
+    reachable through CloudFront from anywhere - every endpoint but /health still
+    needs a valid Cognito token. The managed prefix list counts as ~46 of the
+    security group's 60 inbound rules.
+  EOT
+  type        = bool
+  default     = false
+}

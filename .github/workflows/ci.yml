@@ -109,6 +109,16 @@ jobs:
           NEXT_PUBLIC_API_URL: http://localhost:8000
         run: npm run build
 
+      # The same static export AWS Amplify Hosting builds (amplify.yml).
+      - name: Build static export (Amplify)
+        working-directory: frontend
+        env:
+          NEXT_OUTPUT_MODE: export
+          NEXT_PUBLIC_API_URL: https://api.ci.invalid
+        run: |
+          npm run build
+          test -f out/index.html && test -f out/404.html
+
   # ---------------------------------------------------------------------------
   security:
     name: Security — secrets, dependencies, IaC
@@ -173,6 +183,16 @@ jobs:
         run: |
           terraform -chdir=infra/terraform/envs/dev init -backend=false
           terraform -chdir=infra/terraform/envs/dev validate
+
+      - name: Validate cost-guard
+        run: |
+          terraform -chdir=infra/terraform/envs/cost-guard init -backend=false
+          terraform -chdir=infra/terraform/envs/cost-guard validate
+
+      - name: Validate frontend
+        run: |
+          terraform -chdir=infra/terraform/envs/frontend init -backend=false
+          terraform -chdir=infra/terraform/envs/frontend validate
 
   # ---------------------------------------------------------------------------
   docker:

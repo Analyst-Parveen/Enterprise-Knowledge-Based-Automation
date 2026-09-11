@@ -45,6 +45,23 @@ variable "allowed_cidrs" {
   type        = list(string)
 }
 
+variable "cloudfront_origin_ingress" {
+  description = "Admit CloudFront origin-facing ranges on port 80, for the HTTPS API front door in envs/frontend. Set by scripts/deploy-frontend.sh in frontend.auto.tfvars."
+  type        = bool
+  default     = false
+}
+
+variable "amplify_origin" {
+  description = "HTTPS origin of the Amplify frontend, appended to the CORS allow-list. Set by scripts/deploy-frontend.sh in frontend.auto.tfvars."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.amplify_origin == "" || can(regex("^https://[a-z0-9.-]+\\.amplifyapp\\.com$", var.amplify_origin))
+    error_message = "Must be empty or an https://<branch>.<appId>.amplifyapp.com origin (no path, no trailing slash)."
+  }
+}
+
 # -- image ------------------------------------------------------------------
 variable "backend_image" {
   description = "ECR image URI pinned to a git SHA."

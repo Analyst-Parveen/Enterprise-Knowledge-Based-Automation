@@ -181,57 +181,73 @@ report_header() {
 }
 
 # ---------------------------------------------------------------------------
-# COST GUARD - $20 hard ceiling.
+# COST GUARD - $20 hard ceiling, measured GROSS of credits.
 #
-# Reads month-to-date spend from Cost Explorer and refuses to deploy once the
-# ceiling is crossed. See .claude/rules/aws-infrastructure.md section 5.
+# Spend is read with credits and refunds excluded. With credits netted in, the
+# account reads $0 for as long as credits last, so a net-spend guard could
+# never block anything in time. The same threshold drives the cost-guard
+# Lambda (infra/terraform/envs/cost-guard), so deploy refuses exactly where the
+# kill switch acts. See .claude/rules/aws-infrastructure.md section 5.
 #
 # Note: ce:GetCostAndUsage costs $0.01 per request. Called once per deploy.
 # ---------------------------------------------------------------------------
 MAX_MONTHLY_SPEND_USD="${MAX_MONTHLY_SPEND_USD:-20}"
+COST_GUARD_START="${COST_GUARD_START:-2026-09-01}"
+COST_GUARD_SHUTDOWN_USD="${COST_GUARD_SHUTDOWN_USD:-18}"
 
-month_to_date_spend() {
-  local start end
-  start="$(date -u +%Y-%m-01)"
-  end="$(date -u +%Y-%m-%d)"
-  [ "$start" = "$end" ] && end="$(date -u -d '+1 day' +%Y-%m-%d 2>/dev/null || echo "$end")"
-
+# ce_total FILTER_JSON - sum of UnblendedCost from COST_GUARD_START to today.
+ce_total() {
+  local end
+  end="$(date -u -d '+1 day' +%Y-%m-%d 2>/dev/null || date -u +%Y-%m-%d)"
   aws ce get-cost-and-usage \
-      --time-period "Start=${start},End=${end}" \
+      --time-period "Start=${COST_GUARD_START},End=${end}" \
       --granularity MONTHLY --metrics UnblendedCost \
-      --query 'ResultsByTime[0].Total.UnblendedCost.Amount' \
-      --output text 2>/dev/null || echo "unknown"
+      --filter "$1" \
+      --query 'ResultsByTime[].Total.UnblendedCost.Amount' \
+      --output text 2>/dev/null \
+    | awk '{for (i = 1; i <= NF; i++) s += $i} END {if (NR) printf "%.2f", s; else print "unknown"}' \
+    || true  # awk already printed "unknown" when the call failed; do not die under set -e
+}
+
+# Usage + tax, i.e. what the environment consumed before credits paid for it.
+gross_usage_since_start() {
+  ce_total '{"Not":{"Dimensions":{"Key":"RECORD_TYPE","Values":["Credit","Refund"]}}}'
+}
+
+# Credits applied (a negative number).
+credits_since_start() {
+  ce_total '{"Dimensions":{"Key":"RECORD_TYPE","Values":["Credit"]}}'
 }
 
 assert_within_budget() {
-  step "Cost guard (ceiling: \$${MAX_MONTHLY_SPEND_USD})"
+  step "Cost guard (auto-shutdown at \$${COST_GUARD_SHUTDOWN_USD} gross usage since ${COST_GUARD_START})"
   command -v aws >/dev/null 2>&1 || { warn "aws CLI unavailable - cost guard skipped"; return 0; }
 
   local spend
-  spend="$(month_to_date_spend)"
+  spend="$(gross_usage_since_start)"
 
   if [ "$spend" = "unknown" ] || [ -z "$spend" ]; then
-    warn "could not read month-to-date spend (Cost Explorer may not be enabled)"
+    warn "could not read usage (Cost Explorer may not be enabled)"
     warn "proceeding - but verify spend manually in the Billing console"
     return 0
   fi
 
   local over
-  over="$(awk -v s="$spend" -v m="$MAX_MONTHLY_SPEND_USD" 'BEGIN{print (s+0 >= m+0) ? 1 : 0}')"
+  over="$(awk -v s="$spend" -v m="$COST_GUARD_SHUTDOWN_USD" 'BEGIN{print (s+0 >= m+0) ? 1 : 0}')"
 
   if [ "$over" = "1" ]; then
-    err "month-to-date spend is \$${spend}, ceiling is \$${MAX_MONTHLY_SPEND_USD}"
+    err "gross usage is \$${spend}, the auto-shutdown threshold is \$${COST_GUARD_SHUTDOWN_USD}"
     die "REFUSING TO DEPLOY. Run scripts/destroy.sh and review spend in the Billing console."
   fi
 
-  ok "month-to-date spend \$${spend} of \$${MAX_MONTHLY_SPEND_USD}"
+  ok "gross usage \$${spend} of \$${COST_GUARD_SHUTDOWN_USD} (credits excluded)"
 }
 
 # Print what is running billable right now, and the reminder to destroy.
 cost_reminder() {
   printf '\n%s---------------------------------------------------------------%s\n' "$C_YEL" "$C_RST"
-  printf '%s  Estimated burn: ~$0.072/hour  (ALB + 1 Fargate task)%s\n' "$C_YEL" "$C_RST"
-  printf '%s  A 4-hour demo costs about $0.30.%s\n' "$C_YEL" "$C_RST"
+  printf '%s  Estimated burn: ~$0.09/hour  (Fargate + ALB + 3 public IPv4)%s\n' "$C_YEL" "$C_RST"
+  printf '%s  A 4-hour demo costs about $0.37. Auto-stop after 8h only once the cost guard is armed.%s\n' "$C_YEL" "$C_RST"
   printf '%s  RUN ./scripts/destroy.sh WHEN THE DEMO ENDS - idle time is wasted budget.%s\n' "$C_YEL" "$C_RST"
   printf '%s---------------------------------------------------------------%s\n\n' "$C_YEL" "$C_RST"
 }

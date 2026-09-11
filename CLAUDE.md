@@ -7,11 +7,20 @@
 - **[.claude/skills/](.claude/skills/)** — workflows for deploy, verify, E2E,
   rollback, Terraform, security testing, ingestion, and RAG testing.
 
-## Current status
+## Current status (2026-09-11)
 
-Foundation complete: structure, PROJECT.md, rules, skills, and lifecycle scripts.
-**Phase 0 implementation has not started.** Build phases in order, 0 through 5
-(PROJECT.md section 18).
+Local platform implemented; the last deploy gate passed 190 backend tests and
+the frontend typecheck. **Phase 5 (AWS) is in progress** — status and open items
+in PROJECT.md section 18, operating detail in [RUNBOOK.md](RUNBOOK.md) Part B:
+
+- Account on the AWS **Paid** plan (the Free plan blocks CodeDeploy), `us-west-2`.
+- Four Terraform states: `baseline` and `cost-guard` (protected), `dev` (ephemeral),
+  `frontend` (Amplify + CloudFront, persistent — implemented, not applied yet).
+- CodeDeploy blue-green deployments succeed; `verify.sh` passes.
+- Cost guard applied with **`dry_run = true`**. Never set it to `false` without
+  explicit user approval.
+- Bedrock quotas are 0 in the account — no chat or demo data on AWS yet.
+- `rollback.sh` does not shift traffic yet (placeholder).
 
 ## Non-negotiable safety rules
 
@@ -41,8 +50,9 @@ Foundation complete: structure, PROJECT.md, rules, skills, and lifecycle scripts
   only OpenAI's open-weight `gpt-oss` models are, and they are text-only. Vision
   uses `amazon.nova-lite-v1:0`; embeddings use `amazon.titan-embed-text-v2:0`.
   Nothing but the configured embedding model ever produces embeddings.
-- **Cost: $20 hard ceiling** (not $140). Local Docker Compose for all development
-  at $0. AWS only for demos, at ~$0.30/session. **No NAT Gateway, no RDS, no
+- **Cost: $20 hard ceiling**, measured gross of credits (credits pay first, but
+  a ceiling measured after credits reads $0 until they run out). Local Docker
+  Compose for all development at $0. AWS only for demos, at ~$0.09/hour. **No NAT Gateway, no RDS, no
   ElastiCache, no EKS, no EFS — those resources must not appear in the Terraform
   at all.** Postgres, Qdrant, and Redis run as containers and are re-seeded on
   every deploy. The environment is ephemeral:
@@ -63,18 +73,33 @@ Foundation complete: structure, PROJECT.md, rules, skills, and lifecycle scripts
 ## Lifecycle
 
 ```bash
-./scripts/cost-check.sh  # spend + what is running billable (read-only)
-./scripts/deploy.sh      # refuses past the $20 ceiling
+./scripts/cost-check.sh  # gross/credits/net spend, what is running, kill-switch state (read-only)
+./scripts/deploy.sh      # refuses at $18 gross usage; ends with verify.sh
 ./scripts/verify.sh
-./scripts/seed.sh
-./scripts/test-e2e.sh
-./scripts/rollback.sh    # application-level only, never destroys
+./scripts/seed.sh        # local stack only; on AWS the task seeds itself
+./scripts/test-e2e.sh    # local stack only
+./scripts/rollback.sh    # application-level only, never destroys (traffic shift not built yet)
 ./scripts/destroy.sh     # the ONLY sanctioned terraform destroy path
+
+./scripts/deploy-frontend.sh [--plan-only]   # Amplify frontend + CloudFront API + backend wiring + verify
+./scripts/rollback-frontend.sh [--to <sha>]  # rebuild an earlier frontend commit (app-level only)
 ```
+
+The frontend reaches the API through CloudFront (HTTPS) because the ALB is
+HTTP-only. Never add the Amplify origin or CloudFront ingress to
+`envs/dev/terraform.tfvars` by hand — `deploy-frontend.sh` owns them in
+`envs/dev/frontend.auto.tfvars`.
 
 Settings come from `.env` (see `.env.example`). `EXPECTED_AWS_ACCOUNT_ID`,
 `EXPECTED_AWS_REGION`, and `AWS_REGION` are mandatory — scripts refuse to touch
-AWS without them.
+AWS without them; if unset, they default from the git-ignored
+`infra/terraform/envs/baseline/terraform.tfvars`.
+
+**Before any AWS deploy or verify, check the operator IP.** The ALB admits only
+`allowed_cidrs` in `infra/terraform/envs/dev/terraform.tfvars` (one `/32`). A
+changed home IP makes `verify.sh` fail with a timeout while the deployment itself
+is healthy — confirm with ALB target health and the app logs before touching
+application code.
 
 ## Phases
 

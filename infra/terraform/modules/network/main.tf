@@ -65,7 +65,15 @@ resource "aws_route_table_association" "public" {
 # Security groups
 ##############################################################################
 
-# ALB: reachable only from the operator's own IP, never 0.0.0.0/0.
+# AWS-managed list of the addresses CloudFront uses to reach origins.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  count = var.cloudfront_origin_ingress ? 1 : 0
+  name  = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+# ALB: reachable only from the operator's own IP, never 0.0.0.0/0 - and, when
+# cloudfront_origin_ingress is on, from CloudFront (the HTTPS API front door
+# for the Amplify frontend).
 resource "aws_security_group" "alb" {
   name        = "${var.name}-alb"
   description = "ALB ingress, restricted to the operator CIDR"
@@ -77,6 +85,17 @@ resource "aws_security_group" "alb" {
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = var.allowed_cidrs
+  }
+
+  dynamic "ingress" {
+    for_each = var.cloudfront_origin_ingress ? [1] : []
+    content {
+      description     = "HTTP from CloudFront origin-facing ranges (HTTPS API front door)"
+      from_port       = 80
+      to_port         = 80
+      protocol        = "tcp"
+      prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront[0].id]
+    }
   }
 
   ingress {

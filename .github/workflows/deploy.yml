@@ -94,9 +94,20 @@ jobs:
           REPO: ${{ env.PROJECT_CODE }}-${{ inputs.environment }}-backend
           TAG: ${{ github.sha }}
         run: |
-          # Immutable SHA tag. Never :latest.
-          docker build -f infra/docker/backend.Dockerfile -t "$REGISTRY/$REPO:$TAG" .
-          docker push "$REGISTRY/$REPO:$TAG"
+          # Immutable SHA tag. Never :latest. Re-running the workflow for the
+          # same commit reuses the image already in ECR instead of attempting
+          # an overwrite that tag immutability rejects. The checkout is always
+          # clean, so the tag is guaranteed to match the commit.
+          if OUT=$(aws ecr describe-images --repository-name "$REPO" \
+                --image-ids imageTag="$TAG" 2>&1); then
+            echo "image $TAG already in ECR - reusing it"
+          elif echo "$OUT" | grep -q ImageNotFoundException; then
+            docker build -f infra/docker/backend.Dockerfile -t "$REGISTRY/$REPO:$TAG" .
+            docker push "$REGISTRY/$REPO:$TAG"
+          else
+            echo "::error::could not query ECR: $OUT"
+            exit 1
+          fi
           echo "image=$REGISTRY/$REPO:$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Block on critical image findings
