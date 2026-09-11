@@ -142,8 +142,10 @@ resource "aws_amplify_app" "this" {
   # need 'unsafe-inline' for the inline bootstrap scripts Next.js emits.
   # This is a monorepo app, so Amplify requires the headers under
   # applications[].appRoot - a top-level customHeaders key fails the build with
-  # 'Monorepo spec provided without "applications" key'.
-  custom_headers = yamlencode({
+  # 'Monorepo spec provided without "applications" key'. Sent as JSON (valid
+  # YAML): Amplify stores the spec as JSON, and a YAML string would differ from
+  # it on every plan.
+  custom_headers = jsonencode({
     applications = [{
       appRoot = "frontend" # must match AMPLIFY_MONOREPO_APP_ROOT and amplify.yml
       customHeaders = [{
