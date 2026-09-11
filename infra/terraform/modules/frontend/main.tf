@@ -168,9 +168,11 @@ resource "aws_amplify_app" "this" {
   })
 
   # amplify.yml in the repository is the build spec; the copy the console
-  # stores at connect time is not managed here.
+  # stores at connect time is not managed here. The console also attaches an
+  # SSR logging service role at connect time; removing it forces the provider to
+  # REPLACE the app (and lose its GitHub connection), so it is left as-is.
   lifecycle {
-    ignore_changes = [build_spec]
+    ignore_changes = [build_spec, iam_service_role_arn]
   }
 }
 
@@ -180,5 +182,6 @@ resource "aws_amplify_branch" "this" {
   app_id            = aws_amplify_app.this[0].id
   branch_name       = var.branch_name
   framework         = "Next.js - SSG"
-  enable_auto_build = true # every push to the branch builds and deploys
+  stage             = "PRODUCTION" # what the console sets at connect time; not unset on import
+  enable_auto_build = true         # every push to the branch builds and deploys
 }
