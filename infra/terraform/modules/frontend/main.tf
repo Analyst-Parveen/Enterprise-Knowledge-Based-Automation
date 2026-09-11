@@ -140,30 +140,36 @@ resource "aws_amplify_app" "this" {
 
   # The static export cannot send headers itself. script-src and style-src
   # need 'unsafe-inline' for the inline bootstrap scripts Next.js emits.
+  # This is a monorepo app, so Amplify requires the headers under
+  # applications[].appRoot - a top-level customHeaders key fails the build with
+  # 'Monorepo spec provided without "applications" key'.
   custom_headers = yamlencode({
-    customHeaders = [{
-      pattern = "**/*"
-      headers = [
-        { key = "Strict-Transport-Security", value = "max-age=31536000; includeSubDomains" },
-        { key = "X-Content-Type-Options", value = "nosniff" },
-        { key = "X-Frame-Options", value = "DENY" },
-        { key = "Referrer-Policy", value = "no-referrer" },
-        {
-          key = "Content-Security-Policy"
-          value = join("; ", [
-            "default-src 'self'",
-            "script-src 'self' 'unsafe-inline'",
-            "style-src 'self' 'unsafe-inline'",
-            "img-src 'self' data:",
-            "font-src 'self' data:",
-            "connect-src 'self' ${local.api_url}",
-            "frame-ancestors 'none'",
-            "base-uri 'self'",
-            "form-action 'self'",
-            "object-src 'none'",
-          ])
-        },
-      ]
+    applications = [{
+      appRoot = "frontend" # must match AMPLIFY_MONOREPO_APP_ROOT and amplify.yml
+      customHeaders = [{
+        pattern = "**/*"
+        headers = [
+          { key = "Strict-Transport-Security", value = "max-age=31536000; includeSubDomains" },
+          { key = "X-Content-Type-Options", value = "nosniff" },
+          { key = "X-Frame-Options", value = "DENY" },
+          { key = "Referrer-Policy", value = "no-referrer" },
+          {
+            key = "Content-Security-Policy"
+            value = join("; ", [
+              "default-src 'self'",
+              "script-src 'self' 'unsafe-inline'",
+              "style-src 'self' 'unsafe-inline'",
+              "img-src 'self' data:",
+              "font-src 'self' data:",
+              "connect-src 'self' ${local.api_url}",
+              "frame-ancestors 'none'",
+              "base-uri 'self'",
+              "form-action 'self'",
+              "object-src 'none'",
+            ])
+          },
+        ]
+      }]
     }]
   })
 
