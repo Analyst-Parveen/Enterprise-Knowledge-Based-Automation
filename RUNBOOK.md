@@ -977,7 +977,7 @@ and nothing secret passes through Terraform state.
    branch head, or `--rebuild` was given.
 8. **Verification** (every check runs; one failure fails the deploy):
    - latest Amplify build `SUCCEED`
-   - site `/` → 200, `/chat` → 200, unknown path → 404
+   - site `/` → 200, `/chat` → 200, an unknown path lands on the not-found page
    - HSTS and CSP headers present; HTTP redirects to HTTPS
    - the deployed bundle contains the CloudFront API URL
    - `/api/v1/health` through CloudFront → 200
@@ -999,7 +999,10 @@ on real drift, and no build starts while one is running.
 - **Routing.** The export writes one HTML file per page (`chat.html`, …) and
   Amplify serves `/chat` from `chat.html`. The usual SPA catch-all rewrite to
   `index.html` would render the landing page at every URL, so the only rule is
-  unknown paths → `/404.html` with status 404.
+  unknown paths → `/404.html` (status `404`). In practice Amplify answers a
+  missing path with redirects — `301` to add a trailing slash, then `302` to
+  `/404.html`, which returns `200` — so visitors see the not-found page, but the
+  final HTTP status is not a literal 404.
 - **Headers** (Amplify, since a static export cannot send them): HSTS, `nosniff`,
   `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a CSP whose
   `connect-src` allows only the site and the CloudFront API. `script-src` and

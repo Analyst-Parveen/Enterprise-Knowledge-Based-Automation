@@ -377,17 +377,19 @@ wait_for_job() {  # $1 = job id; returns 0 on SUCCEED
   done
 }
 
+# Job queries: no --max-items (with it the CLI appends a pagination-token line
+# to text output), and strip the \r the Windows CLI adds.
 # Never start a second build while one is in flight - wait for it instead.
-RUNNING_JOB="$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" --max-items 10 \
+RUNNING_JOB="$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" \
   --query "jobSummaries[?status=='PENDING' || status=='PROVISIONING' || status=='RUNNING' || status=='CANCELLING'] | [0].jobId" \
-  --output text 2>/dev/null || echo None)"
+  --output text 2>/dev/null | tr -d '\r' || echo None)"
 if [ -n "$RUNNING_JOB" ] && [ "$RUNNING_JOB" != "None" ]; then
   log "build ${RUNNING_JOB} is already in progress - waiting for it"
   wait_for_job "$RUNNING_JOB" || warn "the in-flight build did not succeed - deciding whether to rebuild"
 fi
 
-LAST_OK_COMMIT="$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" --max-items 25 \
-  --query "jobSummaries[?status=='SUCCEED'] | [0].commitId" --output text 2>/dev/null || echo None)"
+LAST_OK_COMMIT="$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" \
+  --query "jobSummaries[?status=='SUCCEED'] | [0].commitId" --output text 2>/dev/null | tr -d '\r' || echo None)"
 
 REASON=""
 if   [ "$FORCE_REBUILD" = 1 ];              then REASON="--rebuild"
@@ -399,8 +401,11 @@ fi
 JOB_ID=""
 if [ -n "$REASON" ]; then
   log "starting a build: ${REASON}"
+  # Name the commit: otherwise the job records "HEAD" and the live-build check
+  # above can never match, so every run would rebuild.
   JOB_ID="$(aws amplify start-job --app-id "$APP_ID" --branch-name "$BRANCH" --job-type RELEASE \
-             --job-reason "deploy-frontend.sh: ${REASON}" --query 'jobSummary.jobId' --output text)" \
+             --commit-id "$REMOTE_HEAD" --commit-message "deploy-frontend.sh build of ${REMOTE_HEAD:0:7}" \
+             --job-reason "deploy-frontend.sh: ${REASON}" --query 'jobSummary.jobId' --output text | tr -d '\r')" \
     || die "could not start an Amplify build"
   wait_for_job "$JOB_ID" || { write_report "FAILED - Amplify build ${JOB_ID} did not succeed" ""; die "FRONTEND DEPLOY FAILED at the Amplify build - see ${REPORT}"; }
   ok "build ${JOB_ID} succeeded"
@@ -428,15 +433,24 @@ record() {  # $1 = ok|fail, $2 = check, $3 = detail on failure
 }
 code_of() { curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$@" || true; }
 
-LATEST="$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" --max-items 1 \
-  --query 'jobSummaries[0].[status,commitId]' --output text 2>/dev/null || true)"
+LATEST="$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" \
+  --query 'jobSummaries[0].[status,commitId]' --output text 2>/dev/null | tr -d '\r' | head -1 || true)"
 [ "$(printf '%s' "$LATEST" | cut -f1)" = "SUCCEED" ] \
   && record ok "Amplify: latest build SUCCEED ($(printf '%s' "$LATEST" | cut -f2 | cut -c1-7))" \
   || record fail "Amplify: latest build SUCCEED" "got: ${LATEST:-nothing}"
 
 c="$(code_of "${SITE_URL}/")";       [ "$c" = 200 ] && record ok "HTTPS site ${SITE_URL}/ -> 200" || record fail "HTTPS site ${SITE_URL}/ -> 200" "got ${c}"
 c="$(code_of "${SITE_URL}/chat")";   [ "$c" = 200 ] && record ok "page route /chat -> 200" || record fail "page route /chat -> 200" "got ${c}"
-c="$(code_of "${SITE_URL}/no-such-page-$$")"; [ "$c" = 404 ] && record ok "unknown path -> 404" || record fail "unknown path -> 404" "got ${c}"
+# Amplify answers a missing path with redirects (301 trailing slash, then 302 to
+# the 404 rule's /404.html), not a literal 404 status. What must hold is that
+# the visitor lands on the not-found page, never on an app page.
+NF="$(curl -sL -o "${WORK_DIR}/not-found.html" -w '%{url_effective}' --max-time 20 "${SITE_URL}/no-such-page-$$" || true)"
+case "$NF" in
+  */404.html) grep -q 'This page could not be found' "${WORK_DIR}/not-found.html" \
+                && record ok "unknown path -> the 404 page" \
+                || record fail "unknown path -> the 404 page" "landed on ${NF} without the not-found text" ;;
+  *) record fail "unknown path -> the 404 page" "landed on ${NF:-nothing}" ;;
+esac
 
 HEADERS="$(curl -s -D - -o /dev/null --max-time 20 "${SITE_URL}/" | tr -d '\r' || true)"
 printf '%s' "$HEADERS" | grep -qi '^strict-transport-security:' && record ok "HSTS header present" || record fail "HSTS header present"

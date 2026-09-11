@@ -45,15 +45,17 @@ set -- $APP_IDS
 APP_ID="$1"
 SITE_URL="https://${BRANCH}.$(aws amplify get-app --app-id "$APP_ID" --query 'app.defaultDomain' --output text)"
 
-IN_FLIGHT="$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" --max-items 10 \
+# Job queries: no --max-items (with it the CLI appends a pagination-token line
+# to text output), and strip the \r the Windows CLI adds.
+IN_FLIGHT="$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" \
   --query "jobSummaries[?status=='PENDING' || status=='PROVISIONING' || status=='RUNNING'] | [0].jobId" \
-  --output text)"
+  --output text | tr -d '\r')"
 [ -z "$IN_FLIGHT" ] || [ "$IN_FLIGHT" = "None" ] \
   || die "build ${IN_FLIGHT} is still running - wait for it to finish, then roll back"
 
 # Successful builds, newest first: commit <TAB> job id
-OK_BUILDS="$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" --max-items 50 \
-  --query "jobSummaries[?status=='SUCCEED'].[commitId,jobId]" --output text)"
+OK_BUILDS="$(aws amplify list-jobs --app-id "$APP_ID" --branch-name "$BRANCH" \
+  --query "jobSummaries[?status=='SUCCEED'].[commitId,jobId]" --output text | tr -d '\r')"
 [ -n "$OK_BUILDS" ] || die "no successful build of ${BRANCH} exists - nothing to roll back to"
 LIVE_COMMIT="$(printf '%s\n' "$OK_BUILDS" | head -1 | cut -f1)"
 ok "live build: ${LIVE_COMMIT:0:7}"
@@ -83,7 +85,7 @@ fi
 step "Amplify build of ${TARGET:0:7}"
 JOB_ID="$(aws amplify start-job --app-id "$APP_ID" --branch-name "$BRANCH" --job-type RELEASE \
   --commit-id "$TARGET" --commit-message "rollback to ${TARGET:0:7}" \
-  --job-reason "rollback-frontend.sh" --query 'jobSummary.jobId' --output text)" \
+  --job-reason "rollback-frontend.sh" --query 'jobSummary.jobId' --output text | tr -d '\r')" \
   || die "could not start the rollback build"
 
 STATUS=""; LAST=""
