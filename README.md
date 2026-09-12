@@ -4,8 +4,11 @@ A multimodal enterprise RAG and agentic automation platform — a private compan
 knowledge assistant with tenant-aware retrieval, LangGraph workflows, and a
 cost-conscious ephemeral AWS deployment.
 
-> **Status (2026-09-11):** the local platform runs end to end; the last deploy
-> gate passed 190 backend tests and the frontend typecheck. The AWS demo stack
+> **Status (2026-09-12):** the local platform runs end to end; the last deploy
+> gate passed 279 backend tests and the frontend typecheck. Tenant onboarding is
+> now a product feature: a platform operator creates a company and invites its
+> first administrator, that administrator manages its own users, and users sign
+> in with an email and a password instead of pasting a token. The AWS demo stack
 > deploys through CodeDeploy blue-green and passes verification; PostgreSQL on
 > AWS is a private **Amazon RDS** instance (the Postgres sidecar is gone), and
 > the frontend is live on Amplify behind a CloudFront API front door. Open items:
@@ -20,7 +23,7 @@ cost-conscious ephemeral AWS deployment.
 | Document | Purpose |
 |---|---|
 | **[RUNBOOK.md](RUNBOOK.md)** | **How to run it — start here.** Local setup, AWS deploy, blue-green explained, troubleshooting |
-| [docs/handbook/](docs/handbook/) | Complete hands-on training manual in simple Hinglish (Markdown + PDF) |
+| [docs/handbook/](docs/handbook/) | Complete hands-on training manual in simple Hinglish (Markdown + PDF — rebuild with `node scripts/build-handbook-pdf.mjs`) |
 | [infra/terraform/README.md](infra/terraform/README.md) | The four Terraform states, the cost guard and the frontend hosting |
 | [PROJECT.md](PROJECT.md) | Full requirements and architecture — the source of truth |
 | [docs/reports/](docs/reports/) | Timestamped reports from every lifecycle run |
@@ -41,7 +44,7 @@ cost-conscious ephemeral AWS deployment.
 ## Getting started
 
 ```bash
-cp .env.example .env    # set POSTGRES_PASSWORD and DEV_AUTH_SECRET
+cp .env.example .env    # set POSTGRES_PASSWORD, DEV_AUTH_SECRET, DEV_AUTH_PASSWORD
 docker compose -f infra/docker/docker-compose.yml up -d postgres qdrant redis minio minio-init
 
 cd backend && python -m venv .venv && source .venv/Scripts/activate
@@ -52,10 +55,32 @@ uvicorn app.main:app --reload          # http://localhost:8000/docs
 cd ../frontend && npm install && npm run dev    # http://localhost:3000
 ```
 
-Get a login token with `cd backend && python -m seeds.dev_token`.
+Sign in at <http://localhost:3000> with any seeded account's email and the
+`DEV_AUTH_PASSWORD` from your `.env` — the same email/password screen the AWS
+deployment uses, so the sign-in path is never "works on my machine". Seeded
+accounts include a platform operator, an administrator per company, and ordinary
+users; `python -m seeds.seed` prints them. For a quick token instead, use
+`cd backend && python -m seeds.dev_token [--role admin|platform_admin]` and paste
+it under "Developer sign-in", which only appears against a localhost API.
 
 With `AI_PROVIDER=local` the entire stack runs offline with **no AWS account and
 no cost**. Full walkthrough in **[RUNBOOK.md](RUNBOOK.md)**.
+
+## Roles
+
+| Role | Can | Cannot |
+|---|---|---|
+| `platform_admin` | create companies, invite each company's first admin, read the onboarding trail | read any company's documents, chat or metrics |
+| `admin` | manage users in **its own** company, assign `user`/`admin`, see its own metrics and audit log | create a company, create a platform operator, touch another company |
+| `user` | use chat, documents, workflows | manage users or companies |
+
+The hierarchy is enforced in the API, not by hiding buttons: `tenant_id` and
+`role` are read only from the verified Cognito ID token, the platform role and
+the reserved `platform` tenant imply each other, and no API can grant
+`platform_admin` — the first operator is created out of band by
+`scripts/bootstrap-platform-admin.sh`. Accounts are invitation-only: Cognito
+emails a one-time password and the invitee replaces it on first sign-in, so no
+password is ever shared, logged or returned.
 
 ## Lifecycle
 
@@ -74,6 +99,7 @@ deploy -> test -> verify -> live demo -> destroy -> audit -> deploy again
 | `scripts/destroy.sh` | Snapshot the RDS database, then destroy only this project's ephemeral infrastructure |
 | `scripts/deploy-frontend.sh` | Frontend on AWS Amplify: CloudFront API front door, backend wiring, build, verification |
 | `scripts/rollback-frontend.sh` | Rebuild an earlier frontend commit on Amplify (app-level only) |
+| `scripts/bootstrap-platform-admin.sh` | Create the first platform operator in Cognito — the one grant with no API (idempotent, never deletes) |
 
 ## AWS deployment
 

@@ -66,15 +66,45 @@ pytest backend/tests/security -k "auth or ratelimit or upload" -v
 
 - Unauthenticated request rejected with 401.
 - Invalid signature, expired, wrong issuer, wrong audience tokens all rejected.
-- Non-admin cannot reach admin endpoints (metrics, tenants, users, audit logs).
+- Non-admin cannot reach admin endpoints (metrics, own company, users, audit logs).
 - Rate limits trip correctly: 20 API / 10 server-side / 5 uploads per minute per
-  user, returning 429 with `Retry-After`.
+  user, and 10 sign-in attempts per minute per account, returning 429 with
+  `Retry-After`.
 - Upload safety: oversized file, disallowed extension, mismatched magic bytes,
   path-traversal filename, zip/archive bomb — all rejected.
 - Deletion without ownership or authorization is denied and written to
   `audit_events`.
 - Security headers present; CORS reflects only the allow-list; trusted-host
   validation active.
+
+## Suite 3a — The role hierarchy
+
+```bash
+pytest backend/tests/security/test_onboarding_hierarchy.py -v
+pytest backend/tests/integration/test_onboarding_api.py -v
+pytest backend/tests/e2e/test_onboarding_flow.py -v      # needs PostgreSQL
+```
+
+This suite exists to prove one thing: a customer cannot become the service
+provider, and cannot reach another customer.
+
+- The role set is closed — `UserRole`, the `Role` literal and the auth allowlist
+  name exactly `user`, `admin`, `platform_admin`, and any other value is a 401.
+- `platform_admin` is not in `TENANT_ASSIGNABLE_ROLES`, is not a valid value in
+  any request schema (so it is a 422 before a handler runs), and is refused again
+  by `assert_role_assignable`.
+- A token pairing `platform_admin` with a normal tenant — or a normal role with
+  the reserved `platform` tenant — is rejected at verification and logged as
+  critical. Neither half of the platform identity is forgeable alone.
+- A tenant admin cannot create a company by any route or payload.
+- A tenant admin of A cannot list, read, patch, or reset the password of a user
+  in B; the attempt raises a tenant-isolation error and is audited as critical.
+- A platform operator cannot reach a company's user directory.
+- A plain user cannot reach any admin or platform route.
+- A company cannot be left with no active administrator, and an admin cannot
+  change its own role or deactivate itself.
+- No API response, log line, or audit event from the invitation flow contains a
+  password, a token, or a secret.
 
 ## Suite 4 — Supply chain and secrets
 

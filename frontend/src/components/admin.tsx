@@ -7,23 +7,74 @@ import { Badge, Card, EmptyState, ErrorState, Skeleton, statusTone, Table, Td, T
 import type { AuditEvent } from "@/types/api";
 
 /**
- * Admin gate.
+ * Role gates.
  *
- * This is convenience only - it hides UI a non-admin cannot use. The real
- * authorization is the server-side role check on every admin endpoint. Hiding a
- * page is not authorization. See .claude/rules/security.md section 2.
+ * These are convenience only - they hide UI a role cannot use. The real
+ * authorization is the server-side check on every endpoint behind them. Hiding
+ * a page is not authorization. See .claude/rules/security.md section 2.
+ *
+ * Each gate mirrors exactly one backend dependency, so the UI and the API can
+ * never drift into disagreeing about who belongs where:
+ *
+ *   AdminOnly          -> AdminUser         (require_admin)
+ *   TenantAdminOnly    -> TenantAdminUser   (require_tenant_admin)
+ *   PlatformAdminOnly  -> PlatformAdminUser (require_platform_admin)
  */
+function Denied({ title, hint }: { title: string; hint: string }) {
+  return (
+    <Card>
+      <EmptyState title={title} hint={hint} />
+    </Card>
+  );
+}
+
 export function AdminOnly({ children }: { children: React.ReactNode }) {
+  const { me } = useSession();
+
+  if (me?.role !== "admin" && me?.role !== "platform_admin") {
+    return (
+      <Denied
+        title="Administrator access required"
+        hint="This page is restricted to administrators. The API enforces this independently of the UI."
+      />
+    );
+  }
+  return <>{children}</>;
+}
+
+/**
+ * Managing a company's users needs the company's own admin.
+ *
+ * A platform operator is excluded on purpose: it onboards a company and then
+ * stays out of the company's user directory.
+ */
+export function TenantAdminOnly({ children }: { children: React.ReactNode }) {
   const { me } = useSession();
 
   if (me?.role !== "admin") {
     return (
-      <Card>
-        <EmptyState
-          title="Administrator access required"
-          hint="This page is restricted to administrators of your tenant. The API enforces this independently of the UI."
-        />
-      </Card>
+      <Denied
+        title="Company administrator access required"
+        hint={
+          me?.role === "platform_admin"
+            ? "Platform operators onboard a company and its first administrator, but do not manage its users. Use Companies instead."
+            : "This page is restricted to administrators of your company. The API enforces this independently of the UI."
+        }
+      />
+    );
+  }
+  return <>{children}</>;
+}
+
+export function PlatformAdminOnly({ children }: { children: React.ReactNode }) {
+  const { me } = useSession();
+
+  if (me?.role !== "platform_admin") {
+    return (
+      <Denied
+        title="Platform access required"
+        hint="Creating and managing companies is restricted to the service provider. Your company's own administration is under Company admin."
+      />
     );
   }
   return <>{children}</>;

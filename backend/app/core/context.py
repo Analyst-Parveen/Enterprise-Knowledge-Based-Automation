@@ -14,7 +14,17 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Literal
 
-Role = Literal["user", "admin"]
+Role = Literal["user", "admin", "platform_admin"]
+
+# Roles a tenant admin is allowed to hand out inside its own tenant. The
+# platform role is deliberately absent: privilege escalation by a tenant admin
+# is the one thing the hierarchy exists to prevent.
+TENANT_ASSIGNABLE_ROLES: tuple[Role, ...] = ("user", "admin")
+
+# The service provider's own tenant. It holds platform operators and nothing
+# else - no documents, no conversations - so tenant filtering stays universal
+# instead of platform_admin becoming an exception to it.
+PLATFORM_TENANT_ID = "platform"
 
 _correlation_id: ContextVar[str] = ContextVar("correlation_id", default="")
 _request_ctx: ContextVar[RequestContext | None] = ContextVar("request_ctx", default=None)
@@ -32,7 +42,16 @@ class RequestContext:
 
     @property
     def is_admin(self) -> bool:
+        """Operational admin. Still scoped to this principal's own tenant."""
+        return self.role in ("admin", "platform_admin")
+
+    @property
+    def is_tenant_admin(self) -> bool:
         return self.role == "admin"
+
+    @property
+    def is_platform_admin(self) -> bool:
+        return self.role == "platform_admin"
 
 
 # --------------------------------------------------------------------------

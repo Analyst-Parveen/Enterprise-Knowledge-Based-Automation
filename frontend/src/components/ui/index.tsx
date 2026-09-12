@@ -121,7 +121,9 @@ export function CardBody({ className, ...props }: React.HTMLAttributes<HTMLDivEl
 // ---------------------------------------------------------------------------
 // Badge
 // ---------------------------------------------------------------------------
-type BadgeTone = "neutral" | "ok" | "warn" | "danger" | "accent";
+// Badges render straight out of the shared tone maps, so they can carry any
+// tone those maps define - including info and violet, which the role badges use.
+type BadgeTone = Tone;
 
 export function Badge({
   tone = "neutral",

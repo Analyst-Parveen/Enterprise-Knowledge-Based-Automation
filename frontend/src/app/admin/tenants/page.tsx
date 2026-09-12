@@ -25,31 +25,56 @@ export default function AdminTenantsPage() {
 function TenantsView() {
   const { me } = useSession();
   const metrics = useAsync(() => api.admin.metrics(), []);
+  // The company record itself, not just its metrics. There is no parameter on
+  // this endpoint - it returns the caller's own company and nothing else.
+  const company = useAsync(() => api.admin.tenant(), []);
 
   return (
     <>
       <PageHeader
-        title="Tenants"
-        description="Tenant isolation is the core invariant of this platform."
+        title="My Company"
+        description="Your company's account, its seats, and how its data is kept apart from every other company on the platform."
       />
 
       <Card className="mb-6">
         <CardHeader>
-          <CardTitle>Your tenant</CardTitle>
+          <CardTitle>{company.data?.name ?? me?.tenant_name ?? "Your company"}</CardTitle>
         </CardHeader>
-        {metrics.loading ? (
+        {metrics.loading || company.loading ? (
           <CardBody>
             <Skeleton className="h-20" />
           </CardBody>
-        ) : metrics.error ? (
+        ) : metrics.error || company.error ? (
           <CardBody>
-            <ErrorState message={metrics.error} onRetry={metrics.reload} />
+            <ErrorState
+              message={metrics.error ?? company.error ?? "Could not load your company."}
+              onRetry={() => {
+                metrics.reload();
+                company.reload();
+              }}
+            />
           </CardBody>
         ) : (
-          <CardBody className="grid gap-3 sm:grid-cols-3">
-            <Stat label="Tenant ID" value={<span className="font-mono text-sm">{me?.tenant_id}</span>} />
+          <CardBody className="grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            <Stat
+              label="Tenant ID"
+              value={<span className="font-mono text-sm">{me?.tenant_id}</span>}
+            />
+            <Stat
+              label="Users"
+              value={company.data?.active_user_count ?? 0}
+              hint={`${company.data?.admin_count ?? 0} administrator(s)`}
+            />
             <Stat label="Documents" value={metrics.data!.documents} />
             <Stat label="Indexed chunks" value={metrics.data!.chunks} />
+            <Stat
+              label="Onboarded"
+              value={
+                company.data
+                  ? new Date(company.data.created_at).toLocaleDateString()
+                  : "—"
+              }
+            />
           </CardBody>
         )}
       </Card>

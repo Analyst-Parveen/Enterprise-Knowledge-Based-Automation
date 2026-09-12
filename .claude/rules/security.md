@@ -27,13 +27,47 @@ surface, the corresponding control must be present and tested.
 - Amazon Cognito issues JWTs. The backend **verifies signature, issuer, audience,
   and expiry** against the Cognito JWKS on every request. Never trust an unverified
   claim.
-- Roles are exactly `user` and `admin`. No implicit roles.
+- Roles are exactly `user`, `admin` and `platform_admin`. No implicit roles, and
+  no role outside that set: a token carrying anything else is rejected, not
+  downgraded.
 - Authorization is enforced **server-side**. Hiding a button in the frontend is
   not authorization.
 - `tenant_id` is taken from the verified token, **never** from a request body,
   query string, or header supplied by the client.
-- Admin-only endpoints (metrics, audit logs, tenants, users, deployments) require
-  an explicit role check in the route dependency.
+- Admin-only endpoints (metrics, audit logs, own company, users, deployments)
+  require an explicit role check in the route dependency.
+
+### The role hierarchy
+
+`platform_admin` is the service provider's own role. It exists so that creating
+a customer account is not something a customer can do.
+
+| Role | Lives in | May do | May never do |
+|---|---|---|---|
+| `platform_admin` | the reserved `platform` tenant | create companies, invite each company's first admin, read the onboarding trail | read any company's documents, conversations, metrics or chat |
+| `admin` | its own company | manage users **inside its own company**, assign `user` or `admin`, read its own company's metrics and audit log | create a company, create a `platform_admin`, touch another company |
+| `user` | its own company | use the product | manage users or companies |
+
+Three rules make the hierarchy hold, and all three are enforced in code:
+
+1. **The platform role and the platform tenant imply each other.**
+   `_claims_to_context` rejects a token where `role == "platform_admin"` and
+   `tenant_id != "platform"`, and equally one where the tenant is `platform` but
+   the role is not. Neither half is forgeable alone, so tenant filtering stays
+   universal instead of the platform role becoming an exception to it.
+2. **No API grants the platform role.** `TENANT_ASSIGNABLE_ROLES` is
+   `("user", "admin")`; the request schemas do not accept `platform_admin` as a
+   value, and `assert_role_assignable` refuses it again server-side. The first
+   operator is created out of band by `scripts/bootstrap-platform-admin.sh`.
+3. **Cross-tenant reads live in one place and are audited.** The tenant registry
+   is `app/db/control_plane.py`, deliberately separate from `repositories.py` so
+   that module keeps its "every function is tenant-filtered" contract. Every
+   function there sits behind `PlatformAdminUser`, returns no tenant content, and
+   records an audit event for every mutation.
+
+A tenant admin must also never be able to lock its own company out: changing its
+own role or status is refused, and so is any change that would leave the company
+with no active administrator.
 
 ## 3. Request and transport hardening
 
@@ -52,14 +86,38 @@ Required in the FastAPI application setup:
 
 Enforced per authenticated user, backed by Redis:
 
-| Bucket | Limit |
-|---|---|
-| API requests | 20 / minute |
-| Server-side (internal fan-out) requests | 10 / minute |
-| Document uploads | 5 / minute |
+| Bucket | Limit | Keyed by |
+|---|---|---|
+| API requests | 20 / minute | tenant + user |
+| Server-side (internal fan-out) requests | 10 / minute | tenant + user |
+| Document uploads | 5 / minute | tenant + user |
+| Sign-in, forgot-password, reset confirmation | 10 / minute | a hash of the account identifier |
 
 Exceeding a limit returns `429` with a `Retry-After` header and emits a security
 event.
+
+The auth bucket is keyed by **account, not IP**, on purpose. Behind CloudFront
+and an ALB the client IP is either shared by many users or supplied by the
+client, so an IP-keyed limit on sign-in punishes the wrong people and is
+trivially rotated around. The identifier is hashed before it reaches Redis so no
+key ever contains an email address.
+
+## 4a. Credential handling
+
+- Passwords are Cognito's business. The application never sets, stores, reads,
+  logs or returns one, and no API response contains a password field.
+- New accounts are created by invitation: Cognito generates a one-time password
+  and emails it directly, and the invitee replaces it on first sign-in through
+  the `NEW_PASSWORD_REQUIRED` challenge. Nothing shareable ever exists.
+- A failed sign-in returns one generic message for every cause. Distinguishing
+  "no such user" from "wrong password" is account enumeration.
+- `forgot-password` always returns `202`, whether or not the address exists.
+- Deactivating a user revokes its live tokens (`AdminUserGlobalSignOut`) instead
+  of letting them work until they expire.
+- The ECS task role holds only the Cognito admin actions the invitation flow
+  needs, on this project's own user pool ARN. `AdminSetUserPassword` and
+  `AdminDeleteUser` are deliberately **not** granted: the application must not be
+  able to choose someone's password or erase an identity.
 
 ## 5. File upload handling
 

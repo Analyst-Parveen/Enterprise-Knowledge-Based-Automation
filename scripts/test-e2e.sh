@@ -68,6 +68,29 @@ if [ -d "${REPO_ROOT}/backend/tests" ]; then
   else
     record "evaluation harness" FAIL
   fi
+
+  # The onboarding journey drives the real hierarchy against a real database:
+  # platform operator -> two companies -> their admins -> their users, then
+  # proves each company is invisible to the other. It needs PostgreSQL, so it
+  # is reported as skipped rather than failed when the stack is not up.
+  step "Onboarding hierarchy journey (needs PostgreSQL)"
+  if ( cd "${REPO_ROOT}/backend" && "$PYTHON_BIN" -m pytest tests/e2e -q ); then
+    record "onboarding hierarchy journey" PASS
+  else
+    if ( cd "${REPO_ROOT}/backend" && "$PYTHON_BIN" -c "
+import asyncio, sys
+from app.db.session import engine
+from sqlalchemy import text
+async def main():
+    async with engine.connect() as conn:
+        await conn.execute(text('select 1'))
+asyncio.run(main())
+" >/dev/null 2>&1 ); then
+      record "onboarding hierarchy journey" FAIL
+    else
+      skip "onboarding hierarchy journey" "PostgreSQL is not reachable - start docker compose"
+    fi
+  fi
 else
   skip "pytest suites" "backend/tests not found"
 fi
@@ -75,9 +98,11 @@ fi
 # ---------------------------------------------------------------------------
 # Frontend journeys (Playwright)
 #
-# Journeys: auth (2) | dashboard | chat with the full envelope | documents |
-# departments | workflows | feedback | non-admin blocked from admin | sign out
-# | admin: nav, metrics, audit, security, deployments
+# Journeys: auth (5, incl. the password gate and recovery) | dashboard | chat
+# with the full envelope | documents | departments | workflows | feedback |
+# non-admin blocked from admin and platform | sign out | admin: nav, metrics,
+# audit, security, deployments, own-tenant user management | platform: company
+# registry, onboarding, trail, and exclusion from a company's user directory
 # ---------------------------------------------------------------------------
 if [ -f "${REPO_ROOT}/frontend/playwright.config.ts" ] && [ -d "${REPO_ROOT}/frontend/node_modules" ]; then
   step "Playwright end-to-end journeys"
@@ -90,6 +115,12 @@ if [ -f "${REPO_ROOT}/frontend/playwright.config.ts" ] && [ -d "${REPO_ROOT}/fro
   if [ -z "${E2E_ADMIN_TOKEN:-}" ]; then
     E2E_ADMIN_TOKEN="$( ( cd "${REPO_ROOT}/backend" && "$PYTHON_BIN" -m seeds.dev_token --role admin --user seed-admin-a 2>/dev/null ) || echo "")"
     export E2E_ADMIN_TOKEN
+  fi
+  # The platform operator lives in the reserved 'platform' tenant; dev_token
+  # pairs the tenant with the role so the two can never disagree.
+  if [ -z "${E2E_PLATFORM_TOKEN:-}" ]; then
+    E2E_PLATFORM_TOKEN="$( ( cd "${REPO_ROOT}/backend" && "$PYTHON_BIN" -m seeds.dev_token --role platform_admin 2>/dev/null ) || echo "")"
+    export E2E_PLATFORM_TOKEN
   fi
 
   [ -n "$E2E_USER_TOKEN" ] || warn "no user token - authenticated journeys will be skipped"

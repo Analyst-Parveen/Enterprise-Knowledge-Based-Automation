@@ -175,34 +175,56 @@ Open **http://localhost:3000**.
 
 ## Step 8 — Log in
 
-In a **third terminal**, mint a token:
+The sign-in page asks for an **email and a password** — the same screen the AWS
+deployment uses, so you are exercising the real path, not a local shortcut.
+Locally, every seeded account accepts the `DEV_AUTH_PASSWORD` from your `.env`
+(`LocalDev!2026` unless you changed it).
+
+| Email | Role | Sees |
+|---|---|---|
+| `priya@northwind.example` | user | Dashboard, Chat, Workflows, Documents, Departments, Usage, Feedback |
+| `admin@northwind.example` | admin of Northwind | the above **plus** Users, My Company, Documents, AI Metrics, Security, Audit Logs, Deployments |
+| `admin@contoso.example` | admin of Contoso | the same pages, for the other company only |
+| `platform@ekba.example` | platform operator | Companies, Onboarding Trail, Security, Deployments — and **no** chat or documents |
+
+Local sign-in only ever succeeds for an account that already exists in the
+database, so `python -m seeds.seed` has to have run.
+
+### The two demos worth showing
+
+**Tenant isolation.** Sign in as `admin@contoso.example`. That is a full
+**administrator of the other company**. Every admin page opens, but the Documents
+page is empty, the user list holds only Contoso's people, and chat answers "I
+could not find anything" — a complete admin of Contoso cannot see one row of
+Northwind's data.
+
+**Onboarding.** Sign in as `platform@ekba.example`, open **Companies**, and
+onboard one: type a name, watch the tenant id slug appear, create it, then invite
+its administrator. Sign out, sign in as that administrator, and create its users.
+Nothing about the company you just made is visible to any other company — and the
+operator that created it cannot open its documents either.
+
+### Developer sign-in (a token instead)
+
+Faster for scripted checks, and the only option if you have not seeded users:
 
 ```bash
 cd backend
 source .venv/Scripts/activate      # or .\.venv\Scripts\Activate.ps1
 
-python -m seeds.dev_token                                    # normal user
-python -m seeds.dev_token --role admin --user seed-admin-a   # admin
+python -m seeds.dev_token                                     # normal user
+python -m seeds.dev_token --role admin --user seed-admin-a    # company admin
+python -m seeds.dev_token --role platform_admin               # platform operator
 ```
 
-Copy the token it prints and paste it into the sign-in box.
+Expand **"Developer sign-in"** at the bottom of the sign-in page and paste it.
+That disclosure renders only when the API is localhost, so a deployed build has
+no token box at all — and the backend refuses dev-signed tokens outside a dev
+environment regardless. Tokens last 12 hours; real sessions renew themselves.
 
-| Token | Sees |
-|---|---|
-| `python -m seeds.dev_token` | Dashboard, Chat, Workflows, Documents, Departments, Usage, Feedback |
-| `--role admin --user seed-admin-a` | the above **plus** Users, Tenants, Documents, AI Metrics, Security, Audit Logs, Deployments |
-
-**The tenant-isolation demo — the best thing to show:**
-
-```bash
-python -m seeds.dev_token --tenant seed-tenant-contoso --user seed-admin-b --role admin
-```
-
-That is a full **administrator of the other tenant**. The admin pages open, but
-the Documents page is empty and chat answers "I could not find anything" — a
-complete admin of Contoso cannot see one row of Northwind's data.
-
-Tokens last 12 hours.
+`--role platform_admin` always pairs itself with the reserved `platform` tenant,
+because a token claiming the platform role in an ordinary tenant is rejected at
+verification.
 
 ## Step 9 — Ask a question
 
@@ -232,23 +254,30 @@ Other questions the seeded corpus answers:
 
 ```bash
 cd backend
-pytest tests/ -q                 # 190 tests at the last deploy gate (2026-09-11)
+pytest tests/ -q                 # 280 tests; the deploy gate runs 279 of them
 pytest tests/security -q         # the release-blocking ones
+pytest tests/e2e -q              # the onboarding journey (needs PostgreSQL up)
 ruff check app tests seeds
 ```
+
+`tests/e2e/test_onboarding_flow.py` is worth reading rather than just running: it
+onboards two companies through the real HTTP surface, creates their
+administrators and users, and then tries every crossing the hierarchy forbids.
 
 ```bash
 cd frontend
 npm run typecheck
 npx playwright install chromium  # once, first time only
-npx playwright test              # 15 journeys
+npx playwright test              # 29 journeys
 ```
 
-Playwright skips the authenticated journeys unless it has tokens:
+The sign-in journeys run unconditionally. The rest need tokens, and are skipped
+without them:
 
 ```bash
 export E2E_USER_TOKEN=$(cd backend && python -m seeds.dev_token 2>/dev/null)
 export E2E_ADMIN_TOKEN=$(cd backend && python -m seeds.dev_token --role admin --user seed-admin-a 2>/dev/null)
+export E2E_PLATFORM_TOKEN=$(cd backend && python -m seeds.dev_token --role platform_admin 2>/dev/null)
 npx playwright test
 ```
 
@@ -263,10 +292,11 @@ cd backend && source .venv/Scripts/activate && uvicorn app.main:app --reload
 
 # terminal 2
 cd frontend && npm run dev
-
-# terminal 3, when the token expires
-cd backend && python -m seeds.dev_token --role admin --user seed-admin-a
 ```
+
+Then sign in with a seeded email and `DEV_AUTH_PASSWORD`. Sessions renew
+themselves in the background, so there is no third terminal re-minting tokens
+any more.
 
 Stop everything:
 
@@ -604,7 +634,7 @@ In order, stopping at the first failure:
    if gross usage (credits excluded) since `COST_GUARD_START` has reached
    `COST_GUARD_SHUTDOWN_USD` ($18)
 2. **Local gate** — `ruff check`, `ruff format --check`, pytest
-   (`unit`, `integration`, `security`, `evaluation` — 190 tests), frontend typecheck
+   (`unit`, `integration`, `security`, `evaluation` — 279 tests), frontend typecheck
 3. **Image** — refuses uncommitted changes in `backend/` or the Dockerfile (the
    tag must match the commit); reuses the `:<git-sha>` image if ECR already has
    it, otherwise builds and pushes; blocks on critical scan findings
@@ -646,59 +676,84 @@ cd frontend
 NEXT_PUBLIC_API_URL=$(terraform -chdir=../infra/terraform/envs/dev output -raw app_url) npm run dev
 ```
 
-Sign in with a Cognito token (Step 6). `dev_token` does not work on AWS.
+Sign in with an email and a password (Step 6). `dev_token` does not work on AWS.
 
-## Step 6 — Create the Cognito users
+## Step 6 — Onboard the first company
 
-`dev_token` does **not** work here. It refuses unless `ENVIRONMENT=dev` and
-`DEV_AUTH_ENABLED=true`, and Terraform sets `DEV_AUTH_ENABLED=false` on AWS.
-Real tokens come from Cognito.
+On AWS there is no token to paste: `dev_token` refuses unless `ENVIRONMENT=dev`
+and `DEV_AUTH_ENABLED=true`, and Terraform sets `DEV_AUTH_ENABLED=false`. Every
+identity comes from Cognito, and almost all of them are created **through the
+product** rather than the CLI.
+
+### 6.1 The first platform operator — the one grant with no API
+
+Creating a platform operator is the only privileged action with no endpoint
+behind it, deliberately: an API that could mint one would be the most valuable
+target in the product. It is granted out of band, by someone who already holds
+AWS credentials for this account.
+
+```bash
+./scripts/bootstrap-platform-admin.sh --dry-run --email ops@yourcompany.com
+./scripts/bootstrap-platform-admin.sh --email ops@yourcompany.com --name "Platform Operator"
+```
+
+The script verifies the account, region and that the pool is name-owned
+`ekba-dev-*` **and** tagged `ProjectCode=ekba` before it touches anything. It
+never deletes, is safe to re-run, and sets no password — Cognito emails a
+one-time password directly. It writes a report to `docs/reports/` containing no
+credential material.
+
+Run it once per operator. It refuses to promote a user who belongs to a customer
+company, because moving a company's own admin to the platform role is exactly the
+escalation the hierarchy exists to prevent.
+
+### 6.2 Everything else, through the UI
+
+Open the frontend (the `npm run dev` command above, or the Amplify URL from
+`deploy-frontend.sh`) and sign in as that operator. First sign-in asks for a new
+password before any session is issued — the one-time password from the email is a
+challenge credential, not a session.
+
+Then:
+
+1. **Companies → Onboard a company.** Name it; the tenant id slug is previewed
+   and becomes the storage prefix, retrieval filter and cache namespace, so it
+   cannot change later.
+2. **Invite its administrator.** They get their own one-time password by email.
+3. **Sign out.** Sign in as that administrator and create its users under
+   **Users**, assigning `user` or `admin` and a department.
+
+Repeat step 1 for a second company and the isolation demo builds itself: two
+administrators who cannot see each other's users, documents or answers.
+
+### 6.3 What the CLI is still for
+
+Only inspection and the rare repair. The API does the rest, and every change it
+makes is audited:
 
 ```bash
 POOL=$(terraform -chdir=infra/terraform/envs/baseline output -raw cognito_user_pool_id)
-CLIENT=$(terraform -chdir=infra/terraform/envs/baseline output -raw cognito_client_id)
 
-# A normal user in tenant A
-aws cognito-idp admin-create-user \
-  --user-pool-id "$POOL" --username priya@northwind.example \
-  --user-attributes \
-      Name=email,Value=priya@northwind.example \
-      Name=email_verified,Value=true \
-      Name=custom:tenant_id,Value=seed-tenant-northwind \
-      Name=custom:role,Value=user
-
-aws cognito-idp admin-set-user-password \
-  --user-pool-id "$POOL" --username priya@northwind.example \
-  --password 'ChangeMe!2026x' --permanent
+# Who is this, and what tenant/role do they carry?
+aws cognito-idp admin-get-user --user-pool-id "$POOL" --username ops@yourcompany.com \
+  --query "UserAttributes[?starts_with(Name, 'custom:')]"
 ```
 
-Repeat with `Name=custom:role,Value=admin` for an administrator, and with
-`Value=seed-tenant-contoso` for the second tenant — that second tenant is what
-makes the isolation demo possible.
+Changing `custom:role` by hand still works and takes effect on the next sign-in,
+but prefer the UI: a role change made there is recorded as a `user.role_changed`
+audit event with the actor who made it, and a change made by CLI is not.
 
-Get a real token:
+### 6.4 Which token the backend wants
 
-```bash
-aws cognito-idp initiate-auth \
-  --client-id "$CLIENT" --auth-flow USER_PASSWORD_AUTH \
-  --auth-parameters USERNAME=priya@northwind.example,PASSWORD='ChangeMe!2026x' \
-  --query 'AuthenticationResult.AccessToken' --output text
-```
+The bearer token is the Cognito **ID token**, and the auth endpoints return it as
+`token`. This is not a preference — the access token carries neither the
+`custom:*` attributes the app authorizes on nor an `aud` claim, so it fails
+audience verification. The frontend stores the ID token and the refresh token and
+renews silently; nothing about this is manual any more.
 
-Paste that into the sign-in box, exactly like the local token. **The application
-code is identical** — the same `custom:tenant_id` and `custom:role` claims. Only
-the signature changes: HS256 with a local secret becomes RS256 verified against
-the Cognito JWKS.
-
-Promote someone to admin without touching code or redeploying:
-
-```bash
-aws cognito-idp admin-update-user-attributes \
-  --user-pool-id "$POOL" --username priya@northwind.example \
-  --user-attributes Name=custom:role,Value=admin
-```
-
-The change takes effect on their next login, when a fresh token is issued.
+**The application code is identical to local.** The same `custom:tenant_id` and
+`custom:role` claims drive the same checks. Only the signature changes: HS256
+with a local secret becomes RS256 verified against the Cognito JWKS.
 
 ## Step 7 — Watch a blue-green deployment happen
 
@@ -1215,12 +1270,12 @@ which is a fine price for a rollback that takes seconds instead of a rebuild.
 |---|---|
 | `docker compose -f infra/docker/docker-compose.yml up -d` | Start Postgres, Qdrant, Redis, MinIO |
 | `alembic upgrade head` | Create/update database tables |
-| `python -m seeds.seed` | Load demo data |
-| `python -m seeds.dev_token` | Mint a login token |
+| `python -m seeds.seed` | Load demo data, including the seeded accounts you sign in as |
+| `python -m seeds.dev_token [--role admin\|platform_admin]` | Mint a token for "Developer sign-in" (local only) |
 | `uvicorn app.main:app --reload` | Run the API |
 | `npm run dev` | Run the frontend |
-| `pytest tests/ -q` | All backend tests (190 at the last deploy gate) |
-| `npx playwright test` | Frontend journeys |
+| `pytest tests/ -q` | All backend tests (280; the deploy gate runs 279) |
+| `npx playwright test` | Frontend journeys (29) |
 
 ## AWS
 
@@ -1228,6 +1283,7 @@ which is a fine price for a rollback that takes seconds instead of a rebuild.
 |---|---|---|
 | `./scripts/bootstrap-state.sh` | One-time: S3 state bucket + lock table + `terraform init` (baseline, dev) | Creates protected resources only |
 | `./scripts/set-secrets.sh` | One-time: fill the empty secrets | Never overwrites a value |
+| `./scripts/bootstrap-platform-admin.sh --email …` | The first platform operator, straight into Cognito (Step 6.1) | Idempotent; never deletes; sets no password |
 | `./scripts/cost-check.sh` | Gross / credits / net spend, what is running, kill-switch state | Read-only (Cost Explorer calls cost $0.01 each) |
 | `./scripts/deploy.sh` | Full deploy pipeline (Step 5) | Never destroys |
 | `./scripts/verify.sh` | Health of the deployed API from your machine; other checks are placeholders | Read-only |
@@ -1250,7 +1306,11 @@ which is a fine price for a rollback that takes seconds instead of a rebuild.
 |---|---|---|
 | `ModuleNotFoundError: asyncpg` | venv not active, or deps not installed | `source .venv/Scripts/activate`, then `pip install -r requirements.txt -r requirements-dev.txt` |
 | `connection refused :5432` | Containers not up | `docker compose … up -d postgres` |
-| Login rejected | Token expired (12h) or wrong `DEV_AUTH_SECRET` | Mint a new one |
+| `Incorrect email or password` locally | The account is not in the database, or the password is not `DEV_AUTH_PASSWORD` | `python -m seeds.seed`, then use a seeded email with the `.env` password. The message is deliberately the same for both causes |
+| `Too many attempts. Try again shortly.` | 10 sign-in attempts a minute for that account | Wait a minute. The limit is per account, not per IP |
+| Pasted token rejected | Expired (12h), wrong `DEV_AUTH_SECRET`, or `DEV_AUTH_ENABLED=false` | Mint a new one; confirm the flag in `.env` |
+| Signed in, but the Companies pages are missing | You are an `admin`, not a `platform_admin` | Sign in as the platform operator — `--role platform_admin` locally |
+| `Token carries an inconsistent tenant assignment` | The token pairs `platform_admin` with a normal tenant, or vice versa | Expected: the role and the `platform` tenant imply each other. Mint with `--role platform_admin` and no `--tenant` |
 | `relation "documents" does not exist` | Migrations not run | `alembic upgrade head` |
 | Dashboards empty | Not seeded | `python -m seeds.seed` |
 | Qdrant dimension mismatch | Switched `AI_PROVIDER` | Restart Qdrant, re-seed |

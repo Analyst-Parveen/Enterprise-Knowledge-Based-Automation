@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from app.core.context import RequestContext
+from app.core.context import PLATFORM_TENANT_ID, RequestContext
 from app.core.logging import configure_logging, get_logger
 from app.db.models import (
     AuditEvent,
@@ -51,6 +51,13 @@ logger = get_logger("seed")
 # Stable IDs make the seed idempotent.
 TENANT_A = "seed-tenant-northwind"
 TENANT_B = "seed-tenant-contoso"
+
+# The service provider's own tenant, created by migration 0002. Seeding an
+# operator into it is what makes the onboarding flow demonstrable locally: a
+# platform admin has to exist before it can create the first company, and on
+# AWS that identity is created out-of-band by scripts/bootstrap-platform-admin.sh.
+PLATFORM_TENANT = PLATFORM_TENANT_ID
+PLATFORM_ADMIN_ID = "seed-platform-admin"
 
 SEED_DOCUMENTS = [
     (
@@ -171,8 +178,23 @@ async def seed() -> None:
 
     async with get_sessionmaker()() as session:
         # -- tenants -----------------------------------------------------
+        # The platform tenant already exists (migration 0002); upserting it
+        # keeps the seed runnable against a database restored from an older
+        # snapshot without assuming migration order.
+        await _upsert_tenant(session, PLATFORM_TENANT, "Platform Operations", PLATFORM_TENANT_ID)
         await _upsert_tenant(session, TENANT_A, "Northwind Industries", "northwind")
         await _upsert_tenant(session, TENANT_B, "Contoso Ltd", "contoso")
+
+        # -- the service provider's operator -----------------------------
+        await _upsert_user(
+            session,
+            PLATFORM_ADMIN_ID,
+            PLATFORM_TENANT,
+            "platform@ekba.example",
+            UserRole.PLATFORM_ADMIN,
+            "Platform Operator",
+            None,
+        )
 
         # -- users -------------------------------------------------------
         await _upsert_user(

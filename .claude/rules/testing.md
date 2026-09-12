@@ -10,8 +10,15 @@ backend/tests/unit/          fast, isolated, all external I/O mocked
 backend/tests/integration/   real Postgres + Qdrant + Redis via Docker Compose
 backend/tests/security/      threat-model tests (MANDATORY, see below)
 backend/tests/evaluation/    RAG quality metrics against fixed datasets
+backend/tests/e2e/           full-journey tests through the ASGI app + real DB
 frontend/tests/e2e/          Playwright user journeys
 ```
+
+`backend/tests/e2e/` drives a whole business flow rather than one endpoint — the
+onboarding journey creates two companies, their administrators and their users
+through the real HTTP surface, then proves each company is invisible to the
+other. It needs PostgreSQL, so `test-e2e.sh` reports it as skipped (not passed)
+when the local stack is down.
 
 ## 2. Mandatory security tests
 
@@ -24,7 +31,7 @@ these must exist and pass before a feature that touches the relevant surface shi
 3. Forged `tenant_id` in body/header/query is ignored, request rejected.
 4. Semantic cache does not serve one tenant's answer to another.
 5. Agent workflows stay within one tenant at every node.
-6. Admin of tenant A cannot read tenant B documents.
+6. Admin of tenant A cannot read tenant B documents, nor its users.
 
 **Guardrails** (see [guardrails.md](guardrails.md))
 7. Direct prompt injection is detected and refused.
@@ -36,11 +43,26 @@ these must exist and pass before a feature that touches the relevant surface shi
 **Platform security** (see [security.md](security.md))
 12. Unauthenticated request is rejected with 401.
 13. Expired/invalid/wrong-issuer JWT is rejected.
-14. Non-admin cannot reach admin endpoints.
-15. Rate limits return 429 at the configured thresholds (20 / 10 / 5 per minute).
+14. Non-admin cannot reach admin endpoints, and no tenant role can reach the
+    platform endpoints.
+15. Rate limits return 429 at the configured thresholds (20 / 10 / 5 per minute,
+    and 10 sign-in attempts per minute per account).
 16. Malicious upload — wrong magic bytes, oversized file, traversal filename — is
     rejected.
 17. Deletion without ownership or authorization is denied and audited.
+
+**Role hierarchy** (see [security.md](security.md) section 2 and
+[tenant-isolation.md](tenant-isolation.md) section 9)
+18. The role set is closed: `UserRole`, the `Role` literal and the auth
+    allowlist all name exactly `user`, `admin`, `platform_admin`.
+19. A tenant admin cannot create a company or a platform operator, and
+    `platform_admin` in a request body is rejected by the schema.
+20. A tenant admin cannot read or modify a user in another company.
+21. A token pairing `platform_admin` with a normal tenant — or a normal role with
+    the `platform` tenant — is rejected at verification.
+22. A company cannot be left with no active administrator, and an admin cannot
+    change its own role or deactivate itself.
+23. No response or log line from the invitation flow contains a password.
 
 ## 3. Coverage expectations
 
@@ -48,8 +70,11 @@ these must exist and pass before a feature that touches the relevant surface shi
   directly.
 - Services: unit tested with external dependencies mocked.
 - API: integration tested against real infrastructure containers.
-- Frontend: E2E covers login, chat with citations, upload and ingestion status,
-  document list, admin metrics, and the tenant-boundary path.
+- Frontend: E2E covers email/password sign-in and its failure modes, password
+  recovery, sign-out, chat with citations, upload and ingestion status, document
+  list, admin metrics, own-company user management, the platform company
+  registry and onboarding, and the role-gating boundaries between all three
+  roles.
 
 ## 4. Test discipline
 

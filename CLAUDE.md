@@ -7,11 +7,15 @@
 - **[.claude/skills/](.claude/skills/)** — workflows for deploy, verify, E2E,
   rollback, Terraform, security testing, ingestion, and RAG testing.
 
-## Current status (2026-09-11)
+## Current status (2026-09-12)
 
-Local platform implemented; the last deploy gate passed 190 backend tests and
-the frontend typecheck. **Phase 5 (AWS) is in progress** — status and open items
-in PROJECT.md section 18, operating detail in [RUNBOOK.md](RUNBOOK.md) Part B:
+Local platform implemented; the last deploy gate passed 279 backend tests and
+the frontend typecheck. Tenant onboarding is implemented end to end: a
+`platform_admin` creates a company and invites its first admin, that admin
+manages users inside its own company only, and sign-in is email + password
+through Cognito (no token pasting). **Phase 5 (AWS) is in progress** — status and
+open items in PROJECT.md section 18, operating detail in
+[RUNBOOK.md](RUNBOOK.md) Part B:
 
 - Account on the AWS **Paid** plan (the Free plan blocks CodeDeploy), `us-west-2`.
 - Four Terraform states: `baseline` and `cost-guard` (protected), `dev` (ephemeral),
@@ -49,6 +53,21 @@ in PROJECT.md section 18, operating detail in [RUNBOOK.md](RUNBOOK.md) Part B:
   filters every query, retrieval, cache key, S3 prefix, and agent node. A
   cross-tenant leak is total product failure.
   See [tenant-isolation.md](.claude/rules/tenant-isolation.md).
+- **The onboarding hierarchy.** Three roles: `platform_admin` (the service
+  provider, in the reserved `platform` tenant) creates companies and invites each
+  company's first `admin`; that `admin` manages users **inside its own company
+  only** and may assign only `user` or `admin`; `user` manages nothing. No API
+  grants `platform_admin` — `scripts/bootstrap-platform-admin.sh` does, out of
+  band. The platform role and the `platform` tenant imply each other at token
+  verification, so tenant filtering has no exceptions. The single sanctioned
+  cross-tenant surface is `app/db/control_plane.py`: registry data only, behind
+  `PlatformAdminUser`, every mutation audited. See
+  [security.md](.claude/rules/security.md) section 2.
+- **Passwords are Cognito's business.** The app never sets, stores, logs or
+  returns one. Accounts are invitation-only: Cognito emails a one-time password
+  and the invitee replaces it on first sign-in. A failed sign-in gives one
+  generic message, and forgot-password always returns 202 — anything else is
+  account enumeration.
 - **Guardrails are pipeline stages**, not optional. No stage is skipped for speed,
   and a cache hit never bypasses auth, tenant filtering, or the output guardrail.
 - **Bedrock only, for both chat and embeddings.** GPT-4 is *not* on Bedrock —
@@ -90,6 +109,10 @@ in PROJECT.md section 18, operating detail in [RUNBOOK.md](RUNBOOK.md) Part B:
 
 ./scripts/deploy-frontend.sh [--plan-only]   # Amplify frontend + CloudFront API + backend wiring + verify
 ./scripts/rollback-frontend.sh [--to <sha>]  # rebuild an earlier frontend commit (app-level only)
+
+./scripts/bootstrap-platform-admin.sh --email ops@you.com [--dry-run]
+                         # the first platform operator, straight into Cognito.
+                         # Idempotent, never deletes, sets no password.
 ```
 
 The frontend reaches the API through CloudFront (HTTPS) because the ALB is

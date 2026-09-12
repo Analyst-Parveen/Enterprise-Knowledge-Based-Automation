@@ -13,7 +13,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import ratelimit
-from app.core.auth import require_admin, verify_token
+from app.core.auth import (
+    require_admin,
+    require_platform_admin,
+    require_tenant_admin,
+    verify_token,
+)
 from app.core.context import RequestContext, set_request_context
 from app.core.exceptions import AuthenticationError
 from app.db.session import get_session
@@ -46,6 +51,24 @@ async def admin_context(ctx: CurrentUser) -> RequestContext:
 
 
 AdminUser = Annotated[RequestContext, Depends(admin_context)]
+
+
+async def tenant_admin_context(ctx: CurrentUser) -> RequestContext:
+    """Gate for managing the users of one company, scoped to that company."""
+    require_tenant_admin(ctx)
+    return ctx
+
+
+TenantAdminUser = Annotated[RequestContext, Depends(tenant_admin_context)]
+
+
+async def platform_admin_context(ctx: CurrentUser) -> RequestContext:
+    """Service-provider gate. The only role that can create a tenant."""
+    require_platform_admin(ctx)
+    return ctx
+
+
+PlatformAdminUser = Annotated[RequestContext, Depends(platform_admin_context)]
 
 
 # ---------------------------------------------------------------------------

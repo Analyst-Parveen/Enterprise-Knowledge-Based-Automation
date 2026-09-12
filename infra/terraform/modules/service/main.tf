@@ -210,6 +210,29 @@ resource "aws_iam_role_policy" "task" {
         Action   = ["cognito-idp:GetUser", "cognito-idp:DescribeUserPool"]
         Resource = var.cognito_user_pool_arn
       },
+      {
+        # Tenant onboarding: a platform operator invites a company's first
+        # admin, and a company admin invites its own users. The API performs
+        # these as admin calls against THIS pool only - the resource is pinned
+        # to the one pool ARN, and there is no ListUserPools or CreateUserPool
+        # here, so the task cannot discover or create another directory.
+        #
+        # Deliberately absent: AdminSetUserPassword and AdminDeleteUser. The
+        # invitation flow means no code path ever chooses a password, and
+        # deactivation disables an account rather than destroying the identity.
+        Sid    = "AdministerOwnPoolUsers"
+        Effect = "Allow"
+        Action = [
+          "cognito-idp:AdminCreateUser",
+          "cognito-idp:AdminGetUser",
+          "cognito-idp:AdminUpdateUserAttributes",
+          "cognito-idp:AdminEnableUser",
+          "cognito-idp:AdminDisableUser",
+          "cognito-idp:AdminResetUserPassword",
+          "cognito-idp:AdminUserGlobalSignOut",
+        ]
+        Resource = var.cognito_user_pool_arn
+      },
     ]
   })
 }

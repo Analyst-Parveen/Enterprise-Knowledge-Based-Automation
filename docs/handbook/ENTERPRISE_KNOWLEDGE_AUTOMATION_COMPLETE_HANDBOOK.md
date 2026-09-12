@@ -7,7 +7,7 @@
 <p class="subtitle">Tumhare apne project ka hands-on training manual — code, Terraform, scripts aur AWS deployment ke hisaab se, simple Hinglish mein.</p>
 
 <p class="meta">Repository: <code>Analyst-Parveen/Enterprise-Knowledge-Based-Automation</code><br>
-Snapshot: 2026-09-12 · branch <code>aws-deployment</code> · RDS migration ke baad</p>
+Snapshot: 2026-09-12 · branch <code>aws-deployment</code> · tenant onboarding ke baad</p>
 
 </div>
 
@@ -52,6 +52,10 @@ Parveen, ye handbook tumhare **apne repository** ko padh kar likhi gayi hai — 
 | API front door (CloudFront) | Live: `https://d2jw2wchz5oekh.cloudfront.net` |
 | Cost guard | Applied, **`DRY_RUN = true`** (report karta hai, kuch rokta nahi). Ab RDS ko **stop** bhi karta hai (delete kabhi nahi) |
 | Bedrock quota | **0** — isliye AWS par chat answer aur demo seeding abhi nahi chalte |
+| Roles | **Teen**: `user`, `admin`, `platform_admin` (Chapter 2.2) |
+| Tenant onboarding | **Implemented** — platform operator company banata hai aur uska pehla admin invite karta hai; wo admin apne users banata hai (Chapter 7) |
+| Login | **Email + password** (Cognito), pehli baar password set karna, forgot-password, silent refresh, server-side logout. Token paste karna sirf local debugging ke liye bacha hai (Chapter 6) |
+| Tests | 280 backend (deploy gate 279) + 29 Playwright journeys |
 
 <div class="callout warn" markdown="1">
 Ye URLs secret nahi hain, lekin ye state badal sakti hai. `destroy.sh` ke baad backend ALB ka naam badal jata hai; CloudFront aur Amplify URL same rehte hain (Chapter 22).
@@ -76,10 +80,34 @@ Ye project ek **private company knowledge assistant** hai:
 
 | Role | Kaun | Code mein kahan |
 |---|---|---|
-| `user` | Normal employee | `app/core/context.py` — `Role = "user" \| "admin"` |
+| `user` | Normal employee | `app/core/context.py` — `Role = "user" \| "admin" \| "platform_admin"` |
 | `admin` | Us company ka admin | Same; admin endpoints `app/api/v1/admin.py` |
+| `platform_admin` | **Service provider khud** — jo companies ko onboard karta hai | Same; platform endpoints `app/api/v1/platform.py` |
 
-Sirf yahi do roles hain. Koi "super-admin" ya "platform owner" role code mein **nahi hai**.
+Sirf yahi **teen** roles hain, aur code inke alawa kuch accept nahi karta — token mein koi chautha role aaya to request 401 hoti hai, downgrade nahi.
+
+`platform_admin` ek reserved tenant `platform` mein rehta hai. Wo tenant sirf operators rakhta hai — na documents, na conversations. Isliye tenant filtering mein koi exception banane ki zaroorat nahi padti: platform role bhi apne hi tenant se bandha hai.
+
+**Hierarchy — kaun kya kar sakta hai:**
+
+```text
+platform_admin  (tenant "platform")
+  └── company banata hai                      ──> tenant row + audit event
+        └── us company ka pehla admin invite karta hai  (role=admin)
+              └── admin apne users banata hai            (role=user ya admin)
+```
+
+| Role | Kar sakta hai | Kabhi nahi kar sakta |
+|---|---|---|
+| `platform_admin` | company banana, uska pehla admin invite karna, onboarding trail padhna | kisi bhi company ke documents, chat, ya metrics dekhna |
+| `admin` | **sirf apni** company ke users banana/manage karna, `user` ya `admin` role dena, apni company ke metrics aur audit log | nayi company banana, `platform_admin` banana, doosri company ko chhoona |
+| `user` | product use karna | users ya companies manage karna |
+
+Teen cheezein is hierarchy ko todne se rokti hain:
+
+1. **Platform role aur platform tenant ek doosre ko imply karte hain.** Token verify karte waqt hi check hota hai — `platform_admin` normal tenant mein, ya normal role `platform` tenant mein, dono reject. Aadha identity forge karna kaam nahi karta.
+2. **Koi API `platform_admin` nahi de sakti.** Request schema mein hi ye value allowed nahi (422 milta hai handler chalne se pehle), aur server-side `assert_role_assignable` dobara refuse karta hai. Pehla operator `scripts/bootstrap-platform-admin.sh` se banta hai — AWS credentials wale insaan ke haath se, product ke bahar.
+3. **Cross-tenant read sirf ek jagah hai, aur audited hai.** `app/db/control_plane.py` — sirf registry data (naam, id, seat counts), `PlatformAdminUser` dependency ke peeche, har mutation ka audit event.
 
 ## 2.3 Important terms — simple bhasha mein
 
@@ -98,6 +126,9 @@ Sirf yahi do roles hain. Koi "super-admin" ya "platform owner" role code mein **
 ## 2.4 Real-world example
 
 ```text
+SERVICE PROVIDER  (tenant: platform, role: platform_admin)
+   │  companies onboard karta hai, unka content kabhi nahi dekhta
+   ▼
 COMPANY  (tenant: seed-tenant-northwind)
    │
    ├── Department (hr, finance, legal, sales, marketing, operations, technical)
@@ -195,7 +226,7 @@ flowchart LR
 | Qdrant | **Live (container)** | Sidecar, koi managed vector DB nahi |
 | Redis | **Live (container)** | Sidecar. **ElastiCache nahi** |
 | S3 | **Live** | Documents bucket (baseline state) |
-| Cognito | **Configured** | Pool + client bane hain; AWS par user login abhi live-test nahi hua (Chapter 6.6) |
+| Cognito | **Live (code path)** | Pool + client, aur poora email/password sign-in + invitation flow implemented; AWS par live user login pending hai (Chapter 6) |
 | Bedrock | **Configured, blocked** | Account quotas **0** — chat/embedding AWS par throttle hote hain |
 | Transcribe | **Configured** | Audio/video ingestion ke liye; AWS par test nahi hua |
 | CodeDeploy | **Live** | Blue/green deployments successful |
@@ -227,8 +258,8 @@ Enterprise-Knowledge-Based-Automation/
 │   │   ├── main.py                 ← FastAPI app, middleware, routes
 │   │   ├── core/                   ← config, auth, context, logging, middleware, ratelimit
 │   │   ├── api/deps.py             ← auth + rate-limit dependencies
-│   │   ├── api/v1/                 ← health, documents, chat, agents, admin
-│   │   ├── db/                     ← models.py, repositories.py, session.py
+│   │   ├── api/v1/                 ← health, auth, documents, chat, agents, admin, platform
+│   │   ├── db/                     ← models.py, repositories.py, control_plane.py, session.py
 │   │   ├── services/
 │   │   │   ├── rag/                ← pipeline, cache, guardrails, prompts, rerank
 │   │   │   ├── ingestion/          ← pipeline, extractors, chunker
@@ -236,20 +267,22 @@ Enterprise-Knowledge-Based-Automation/
 │   │   │   ├── agents/             ← LangGraph workflows
 │   │   │   ├── security/           ← injection scan, file safety
 │   │   │   ├── observability/      ← evaluation metrics
+│   │   │   ├── identity.py         ← Cognito admin APIs + dev-local provider
+│   │   │   ├── onboarding.py       ← role/tenant guard functions (pure)
 │   │   │   ├── vector.py           ← Qdrant (tenant filter)
 │   │   │   └── storage.py          ← S3 / MinIO
 │   │   ├── schemas.py              ← Pydantic request/response models
 │   │   └── workers/                ← sirf __init__.py — koi separate worker nahi
-│   ├── alembic/versions/0001_initial_schema.py   ← DB migration
+│   ├── alembic/versions/           ← 0001_initial_schema, 0002_platform_onboarding
 │   ├── seeds/seed.py, documents.py, dev_token.py ← demo data + local token
-│   └── tests/unit|integration|security|evaluation
+│   └── tests/unit|integration|security|evaluation|e2e
 ├── frontend/
 │   ├── next.config.mjs             ← export (Amplify) vs standalone (Docker)
-│   ├── src/app/                    ← pages (dashboard, chat, documents, admin/...)
+│   ├── src/app/                    ← pages (dashboard, chat, documents, admin/..., platform/...)
 │   ├── src/components/             ← shell, ui, charts, admin
 │   ├── src/lib/api.ts              ← EK hi API client
 │   ├── src/types/api.ts            ← backend response types
-│   └── tests/e2e/journeys.spec.ts  ← Playwright (15 journeys)
+│   └── tests/e2e/journeys.spec.ts  ← Playwright (29 journeys)
 ├── infra/
 │   ├── docker/                     ← docker-compose.yml, backend/frontend Dockerfiles
 │   └── terraform/
@@ -270,20 +303,24 @@ Har file ke liye: **Purpose → Kaun call karta hai → Ye kya call karti hai �
 
 | File | Purpose | Called by | Calls | Edit kab? | Test kaise? |
 |---|---|---|---|---|---|
-| `backend/app/main.py` | FastAPI app banata hai, middleware order, 5 routers, startup par Qdrant collection ensure | uvicorn | `core/*`, `api/v1/*`, `vector.ensure_collection` | Naya router/middleware | `pytest tests/integration` |
+| `backend/app/main.py` | FastAPI app banata hai, middleware order, 7 routers, startup par Qdrant collection ensure | uvicorn | `core/*`, `api/v1/*`, `vector.ensure_collection` | Naya router/middleware | `pytest tests/integration` |
 | `backend/app/core/config.py` | **Sabhi settings ek jagah** (`Settings`), `.env` repo root se padhta hai | Har module | pydantic-settings | Naya config variable | `pytest tests/unit` + `.env.example` update |
 | `backend/app/core/auth.py` | JWT verify (Cognito RS256 ya local dev HS256), tenant + role nikalna | `api/deps.py` | Cognito JWKS | Auth rules | `pytest tests/security/test_platform_security.py` |
-| `backend/app/api/deps.py` | `CurrentUser`, `AdminUser`, rate-limited users — har route ki "gate" | Har route | `auth.verify_token`, `ratelimit.enforce` | Naya permission type | security tests |
+| `backend/app/api/deps.py` | `CurrentUser`, `AdminUser`, `TenantAdminUser`, `PlatformAdminUser`, rate-limited users — har route ki "gate" | Har route | `auth.verify_token`, `ratelimit.enforce` | Naya permission type | security tests |
 | `backend/app/core/middleware.py` | Correlation ID, security headers, trusted hosts, body size limit | `main.py` | — | Header/limit badalna | integration tests |
-| `backend/app/core/ratelimit.py` | Redis par per-user rate limit (20/10/5 per min) | `deps.py` | Redis | Limits | security tests |
+| `backend/app/core/ratelimit.py` | Redis par per-user rate limit (20/10/5 per min) + per-account auth limit (10/min) | `deps.py`, `api/v1/auth.py` | Redis | Limits | security tests |
+| `backend/app/services/identity.py` | Cognito admin APIs (invite, role/status change, password reset, global sign-out) + `$0` local provider | `api/v1/auth.py`, `admin.py`, `platform.py` | boto3 `cognito-idp` | Auth ya invite flow | `pytest tests/integration/test_onboarding_api.py` |
+| `backend/app/services/onboarding.py` | Guard functions — tenant id validation, role assignability, last-admin protection. Koi DB, koi I/O | `admin.py`, `platform.py` | — | Hierarchy rules | `pytest tests/security/test_onboarding_hierarchy.py` |
 
 ### Data layer
 
 | File | Purpose | Edit kab? |
 |---|---|---|
 | `backend/app/db/models.py` | 10 tables ka SQLAlchemy model | Naya column/table → **saath mein Alembic migration zaroori** |
-| `backend/app/db/repositories.py` | Tenant-filtered data access (documents, jobs, usage, audit) | Naya query — hamesha `tenant_id` filter ke saath |
+| `backend/app/db/repositories.py` | Tenant-filtered data access (documents, jobs, usage, audit, apni company ke users) | Naya query — hamesha `tenant_id` filter ke saath |
+| `backend/app/db/control_plane.py` | **Ekmatra** cross-tenant surface: company registry. Sirf `PlatformAdminUser` ke peeche, sirf registry data, har mutation audited. `repositories.py` se alag rakha gaya hai taaki us file ka "sab kuch tenant-filtered hai" contract bina exception bana rahe | Sirf registry feature — yahan koi document/chat query add karna rule violation hai |
 | `backend/alembic/versions/0001_initial_schema.py` | Poora schema banane wali migration | Kabhi edit mat karo agar kahin apply ho chuki; nayi migration banao |
+| `backend/alembic/versions/0002_platform_onboarding.py` | `PLATFORM_ADMIN` enum label, `tenants.contact_email`, `tenants.created_by`, `users.invited_by`, reserved `platform` tenant row. Sirf additive — purana data chhua nahi jaata | Same |
 
 ### Services (business logic)
 
@@ -310,8 +347,11 @@ Har file ke liye: **Purpose → Kaun call karta hai → Ye kya call karti hai �
 
 | File | Purpose | Edit kab? |
 |---|---|---|
-| `frontend/src/lib/api.ts` | **Ekmatra** API client — token, correlation ID, errors | Naya endpoint call |
-| `frontend/src/components/shell.tsx` | Session (sign-in/out), sidebar nav, page header | Nav item, login screen |
+| `frontend/src/lib/api.ts` | **Ekmatra** API client — token, silent refresh, correlation ID, errors | Naya endpoint call |
+| `frontend/src/components/shell.tsx` | Session (email/password sign-in, first-sign-in challenge, password recovery, server-side sign-out), role-aware sidebar nav, page header | Nav item, login screen |
+| `frontend/src/components/admin.tsx` | Role gates — `AdminOnly`, `TenantAdminOnly`, `PlatformAdminOnly`. Har gate backend ki exactly ek dependency ko mirror karta hai | Naya gated page |
+| `frontend/src/app/platform/tenants/page.tsx` | Company onboarding wizard + registry (platform operator ke liye) | Onboarding UX |
+| `frontend/src/app/admin/users/page.tsx` | Apni company ke users — invite, role/department, deactivate, password reset | User management UX |
 | `frontend/src/components/ui/index.tsx` | Buttons, cards, badges, tables, stat tiles | Design system |
 | `frontend/src/components/charts.tsx` | SegmentedBar, BarList, RingMeter (no library) | Chart badlav |
 | `frontend/src/app/dashboard/page.tsx` | Dashboard (real API data) | Dashboard |
@@ -331,6 +371,7 @@ Har file ke liye: **Purpose → Kaun call karta hai → Ye kya call karti hai �
 | `scripts/_common.sh` | Saare scripts ke shared guards (account check, cost guard, reports) |
 | `scripts/deploy.sh` | Backend deploy pipeline |
 | `scripts/deploy-frontend.sh` | Frontend deploy + wiring + verification |
+| `scripts/bootstrap-platform-admin.sh` | Pehla platform operator — seedha Cognito mein. Ekmatra privileged grant jiski koi API nahi hai |
 | `scripts/destroy.sh` | **Ekmatra** `terraform destroy` path |
 
 <div class="callout warn" markdown="1">
@@ -396,7 +437,8 @@ Down ho to: upload aur download fail; baaki search chalta rahega (chunks Qdrant 
 | MFA | `OFF` ("demo scope") |
 | App client | Public client (**no secret**), flows: `USER_PASSWORD_AUTH`, `USER_SRP_AUTH`, `REFRESH_TOKEN_AUTH` |
 | Token validity | Access 1 hour, ID 1 hour, Refresh 7 days |
-| Hosted UI domain | **Configure nahi hai** — Terraform mein `aws_cognito_user_pool_domain` nahi hai |
+| Hosted UI domain | **Configure nahi hai** — Terraform mein `aws_cognito_user_pool_domain` nahi hai, aur zaroorat bhi nahi: sign-in apna custom form hai jo `/api/v1/auth/login` se Cognito ko call karta hai |
+| Custom attributes | `custom:tenant_id` (max 64), `custom:role` (max 16 — `platform_admin` 14 chars mein fit hai) |
 
 Console: **Cognito → User pools → ekba-dev-users → Users**.
 
@@ -557,7 +599,7 @@ Poori detail Chapter 30. Short mein: 2 budgets + hourly EventBridge rule → SNS
 | Role | Kaam |
 |---|---|
 | `ekba-dev-execution` | ECS task start: ECR pull, logs, **sirf project ke secrets** padhna |
-| `ekba-dev-task` | App runtime: documents bucket objects, Bedrock invoke, Transcribe, Cognito read |
+| `ekba-dev-task` | App runtime: documents bucket objects, Bedrock invoke, Transcribe, aur **is project ke apne user pool par** invitation flow ke Cognito admin actions (`AdminCreateUser`, `AdminGetUser`, `AdminUpdateUserAttributes`, `AdminEnable/DisableUser`, `AdminResetUserPassword`, `AdminUserGlobalSignOut`). `AdminSetUserPassword` aur `AdminDeleteUser` **jaan-boojh kar nahi** — app kisi ka password choose nahi kar sakta, identity mita nahi sakta |
 | `ekba-dev-codedeploy` | `AWSCodeDeployRoleForECS` |
 | `ekba-dev-github-deploy` | GitHub Actions OIDC deploy role (scoped to this repo) |
 | `ekba-dev-cost-guard` | Sirf `ecs:UpdateService` + `DeleteLoadBalancer`, woh bhi `ephemeral` tag wale `ekba-dev` resources par |
@@ -614,20 +656,32 @@ aws rds describe-db-snapshots --db-instance-identifier ekba-dev-postgres \
 sequenceDiagram
     autonumber
     participant U as User
-    participant FE as Frontend (sign-in box)
-    participant CG as Cognito
+    participant FE as Frontend (sign-in form)
     participant API as Backend (FastAPI)
-    U->>CG: aws cognito-idp initiate-auth (CLI) — email + password
-    CG-->>U: ID token + Access token (JWT)
-    U->>FE: Token paste karta hai
-    FE->>FE: sessionStorage["ekba.token"] = token
-    FE->>API: GET /api/v1/me  (Authorization: Bearer token)
+    participant CG as Cognito
+    U->>FE: email + password
+    FE->>API: POST /api/v1/auth/login
+    API->>API: rate limit — is account par 10/min
+    API->>CG: InitiateAuth (USER_PASSWORD_AUTH)
+    CG-->>API: ID token + refresh token (ya NEW_PASSWORD_REQUIRED challenge)
+    API-->>FE: {token, refresh_token, expires_in, user}
+    FE->>FE: sessionStorage mein token + refresh + expiry
+    FE->>API: GET /api/v1/me  (Authorization: Bearer <ID token>)
     API->>CG: JWKS se public key (1 ghante cache)
     API->>API: signature, issuer, audience, expiry verify
     API->>API: sub, custom:tenant_id, custom:role nikalo
-    API-->>FE: {user_id, tenant_id, role, email}
+    API-->>FE: {user_id, tenant_id, tenant_name, role, email}
     FE-->>U: Dashboard (role ke hisaab se nav)
 ```
+
+Pehli baar login karne wale invited user ke liye ek extra step hai: Cognito
+`NEW_PASSWORD_REQUIRED` challenge bhejta hai, frontend "Set your password" screen
+dikhata hai, aur `POST /api/v1/auth/new-password` ke baad hi session milta hai.
+One-time password ek challenge credential hai, session nahi.
+
+Password bhoolne par: `POST /api/v1/auth/forgot-password` (jo **hamesha** 202
+deta hai, chahe email exist kare ya na kare — warna wo account enumeration ban
+jaata) aur phir code ke saath `POST /api/v1/auth/confirm-password-reset`.
 
 ## 6.2 Basic terms
 
@@ -637,11 +691,13 @@ sequenceDiagram
 
 ## 6.3 Frontend kya karta hai (actual code)
 
-- Sign-in screen (`components/shell.tsx → SignIn`) mein ek **"Access token" box** hai — **koi username/password form nahi**. User token paste karta hai.
-- Token `sessionStorage` key **`ekba.token`** mein jata hai (`lib/api.ts`) — tab band karo to token gaya.
-- Har request par header: `Authorization: Bearer <token>` + `X-Correlation-ID`.
-- API se **401** aaya to token delete (`clearToken`) → wapas sign-in screen.
-- **Token refresh ka logic nahi hai** — token expire hone par naya token paste karna padega.
+- Sign-in screen (`components/shell.tsx → SignIn`) mein **email + password form** hai. Chaar stages: `credentials` → `new-password` (pehli baar) / `forgot` → `reset`.
+- Token `sessionStorage` mein jata hai (`lib/api.ts`), refresh token aur expiry ke saath — tab band karo to session gaya. Cookie jaan-boojh kar nahi: ye ek pure SPA hai jo alag API origin se baat karta hai, aur sessionStorage khud-ba-khud har cross-site request se bahar rehta hai.
+- Har request par header: `Authorization: Bearer <ID token>` + `X-Correlation-ID`.
+- **Silent refresh hai.** Token expire hone se 2 minute pehle hi `POST /api/v1/auth/refresh` chal jaata hai, aur 401 aane par ek baar retry hota hai. Ek hi in-flight refresh promise share hota hai, warna 10 parallel requests 10 refresh trigger kar deti.
+- Sign-out pehle server par `POST /api/v1/auth/logout` maarta hai (Cognito global sign-out — saare live tokens revoke), phir local session clear karta hai. Sirf local clear karna "logout jaisa lagta hai" hota, logout nahi.
+- Refresh bhi fail ho jaye to token delete (`clearToken`) → wapas sign-in screen.
+- **"Developer sign-in"** disclosure mein wahi purana token box hai, lekin wo sirf tab render hota hai jab API localhost ho — deployed build mein wo box hota hi nahi.
 
 ## 6.4 Backend kya karta hai (`core/auth.py`)
 
@@ -651,8 +707,9 @@ sequenceDiagram
 4. Claims → `RequestContext`:
    - `user_id` = `sub`
    - `tenant_id` = `custom:tenant_id` (ya `tenant_id`) — **nahi mila to 401** ("Token is missing a tenant assignment.")
-   - `role` = `custom:role` (default `user`); `user`/`admin` ke alawa kuch bhi → 401
-5. Ye context poori request mein use hota hai — koi route khud token parse nahi karta.
+   - `role` = `custom:role` (default `user`); `user`/`admin`/`platform_admin` ke alawa kuch bhi → 401
+5. **Platform role aur platform tenant ka mutual binding:** agar `role == "platform_admin"` hai lekin tenant `platform` nahi (ya ulta), to 401 + critical security event. Isliye platform identity ka aadha hissa forge karke kuch nahi milta.
+6. Ye context poori request mein use hota hai — koi route khud token parse nahi karta.
 
 **Errors ka matlab:**
 
@@ -663,19 +720,30 @@ sequenceDiagram
 | Expired | 401 `Token has expired.` | `auth.token_expired` |
 | Galat issuer/audience | 401 `Invalid token.` | `auth.bad_issuer` / `auth.bad_audience` |
 | Tenant claim missing | 401 | `auth.missing_tenant` |
+| `platform_admin` normal tenant mein (ya ulta) | 401 `Token carries an inconsistent tenant assignment.` | `auth.platform_role_tenant_mismatch` (critical) |
 | Admin route par non-admin | 403 | `authz.admin_required` |
+| Platform route par tenant role | 403 | `authz.platform_required` |
+| Galat email/password | 401 `Incorrect email or password.` — dono cases mein **ek hi** message | `auth.signin_failed` |
+| Ek account par 10+ sign-in attempts/min | 429 `Retry-After` ke saath | rate-limit event |
 
 ## 6.5 Tenant aur role kahan se aate hain
 
 **Sirf verified token se.** Request body, query ya header mein `tenant_id` bhejne se kuch nahi hota — `ChatRequest` mein `tenant_id` field hai hi nahi (`schemas.py`: "deliberately no tenant_id field").
 
-## 6.6 Discrepancy — kaunsa token paste karna hai?
+## 6.6 ID token vs Access token — kyun ID token
 
-<div class="callout warn" markdown="1">
-**RUNBOOK (Part B, Step 6)** Cognito se `AuthenticationResult.AccessToken` lene ko kehta hai.
-**Code** (`core/auth.py`) `custom:tenant_id` claim maangta hai aur `aud` ko client ID se verify karta hai. Cognito ke standard tokens mein **ye dono ID token mein hote hain**, access token mein nahi.
+Ye ek interview-favourite detail hai, aur ab isse manually deal karne ki zaroorat nahi — auth endpoints seedha ID token return karte hain.
 
-Isliye code ke hisaab se **ID token** chahiye:
+Wajah: `core/auth.py` `custom:tenant_id` claim maangta hai aur `aud` ko client ID se verify karta hai. Cognito ke standard tokens mein **ye dono ID token mein hote hain**:
+
+| | ID token | Access token |
+|---|---|---|
+| `custom:tenant_id`, `custom:role` | ✅ | ❌ |
+| `aud` (client ID) | ✅ | ❌ (`client_id` hota hai, `aud` nahi) |
+
+Matlab access token audience verification par hi fail ho jaata. Agar kabhi "Token is missing a tenant assignment" dikhe, to 90% chance hai ki access token use ho raha hai.
+
+CLI se debug karna ho to:
 
 ```bash
 aws cognito-idp initiate-auth --client-id "$CLIENT" --auth-flow USER_PASSWORD_AUTH \
@@ -683,16 +751,22 @@ aws cognito-idp initiate-auth --client-id "$CLIENT" --auth-flow USER_PASSWORD_AU
   --query 'AuthenticationResult.IdToken' --output text
 ```
 
-Ye AWS par abhi tak live test nahi hua (Cognito users banaye nahi gaye). Pehli baar karte waqt agar AccessToken se "Token is missing a tenant assignment" aaye, to wajah yahi hai. Frontend ka sign-in text bhi "Cognito hosted UI" bolta hai — lekin hosted UI domain configure nahi hai.
-</div>
+## 6.7 Password kabhi app ke paas nahi aata
 
-## 6.7 Token expiry
+Ye ek design decision hai, shortcut nahi:
+
+- App password **set, store, read, log ya return** kabhi nahi karta. Kisi bhi API response mein password field nahi hai.
+- Naye accounts sirf invitation se bante hain: Cognito khud one-time password generate karke email karta hai, aur invitee pehle sign-in par apna password set karta hai. Share karne layak koi cheez exist hi nahi karti.
+- ECS task role ke paas `AdminSetUserPassword` aur `AdminDeleteUser` **jaan-boojh kar nahi** hain — application kisi ka password choose nahi kar sakta, aur identity mita nahi sakta.
+- User deactivate karne par live tokens turant revoke hote hain (`AdminUserGlobalSignOut`), expire hone ka intezaar nahi.
+
+## 6.8 Token expiry
 
 | Mode | Validity |
 |---|---|
 | Local `dev_token` | Default 12 ghante (`--hours`) |
-| Cognito ID/Access token | 1 ghanta (app client config) |
-| Refresh token | 7 din — lekin frontend refresh use **nahi karta** |
+| Cognito ID token | 1 ghanta (app client config) |
+| Refresh token | 7 din — frontend ise **use karta hai**, expiry se 2 min pehle silently renew |
 
 <div class="pagebreak"></div>
 
@@ -700,54 +774,78 @@ Ye AWS par abhi tak live test nahi hua (Cognito users banaye nahi gaye). Pehli b
 
 ## 7.1 Seedhi baat pehle
 
-<div class="callout warn" markdown="1">
-**Company registration ka koi UI ya API nahi hai.** Project mein currently ye implemented nahi hai. Admin ka "Users" page sirf samjhata hai ki users Cognito mein bante hain. "Tenants" page sirf apne tenant ke metrics dikhata hai.
-</div>
+Company onboarding ek **product feature** hai, CLI ritual nahi. Teen level hain, aur har level sirf apne se ek neeche wale ko bana sakta hai:
+
+```text
+platform_admin  ──creates──>  Company (tenant)
+                              └──invites──>  admin (us company ka)
+                                             └──creates──>  user / admin (usi company mein)
+```
+
+Sideways ya upar ki taraf kuch nahi hota: ek company ka admin na nayi company bana sakta, na platform operator, na doosri company ko chhoo sakta.
 
 ## 7.2 Tenant ID kahan "rehta" hai?
 
-- Tenant ek **string** hai (jaise `seed-tenant-northwind`) jo user ke Cognito attribute `custom:tenant_id` mein likhi hoti hai.
-- Database mein `tenants` aur `users` tables **hain** (`models.py`), aur `seeds/seed.py` unme demo rows daalta hai.
-- Lekin **authentication in tables ko padhta hi nahi** — `repositories.get_user_by_sub` define hai par kahin call nahi hota. Tenant sirf token claim hai.
-- Matlab: naya tenant "banana" = naye users ke `custom:tenant_id` mein ek naya, unique string likhna. Data us tenant ID ke saath apne-aap alag rehta hai (har table, har Qdrant point, har S3 key, har cache key mein tenant ID hota hai).
+Do jagah, aur dono ka kaam alag hai:
 
-## 7.3 Example: "ABC Insurance" ko onboard karna (currently supported tareeka)
+- **Cognito attribute `custom:tenant_id`** — ye **authorization** ka source hai. Token se padha jaata hai, aur sirf yahi count hota hai. Body/query/header mein `tenant_id` bhejne se kuch nahi hota.
+- **`tenants` table (PostgreSQL/RDS)** — ye company ka **record** hai: naam, contact, kisne banaya, kab. Registry yahan hai, permission nahi.
 
-**Step 1 — Tenant ID decide karo.** Unique aur stable, jaise `tenant-abc-insurance`. (Koi DB insert zaroori nahi.)
+Ye jaan-boojh kar alag hain. Token compromise ho jaye to DB row usse rok nahi sakti, aur DB down ho jaye to authorization tootna nahi chahiye. Isliye tenant ka naam dikhane wala lookup `/me` mein try/except ke andar hai — DB ka blip ek valid session ko invalid nahi banata.
 
-**Step 2 — Admin banao (Cognito, CLI):**
+Tenant ID **permanent** hai: wo S3 prefix, Qdrant retrieval filter aur cache namespace ban jaata hai, isliye baad mein badla nahi ja sakta.
+
+## 7.3 Example: "ABC Insurance" ko onboard karna
+
+### Step 0 — Pehla platform operator (ek hi baar, poore system mein)
+
+Ye ekmatra privileged grant hai jiski koi API nahi hai — jaan-boojh kar. Jo API platform operator bana sakti, wo product ka sabse qeemati target hoti.
 
 ```bash
-POOL=$(terraform -chdir=infra/terraform/envs/baseline output -raw cognito_user_pool_id)
-
-aws cognito-idp admin-create-user --user-pool-id "$POOL" \
-  --username admin@abc-insurance.example \
-  --user-attributes Name=email,Value=admin@abc-insurance.example Name=email_verified,Value=true \
-                    Name=custom:tenant_id,Value=tenant-abc-insurance Name=custom:role,Value=admin
-
-aws cognito-idp admin-set-user-password --user-pool-id "$POOL" \
-  --username admin@abc-insurance.example --password '<STRONG_PASSWORD>' --permanent
+./scripts/bootstrap-platform-admin.sh --dry-run --email ops@yourcompany.com
+./scripts/bootstrap-platform-admin.sh --email ops@yourcompany.com --name "Platform Operator"
 ```
 
-**Step 3 — Normal user banao:** same commands, `custom:role` = `user`.
+Script pehle account, region aur pool ka ownership verify karta hai (naam `ekba-dev-*` **aur** tag `ProjectCode=ekba`), phir Cognito user banata hai `custom:role=platform_admin` + `custom:tenant_id=platform` ke saath. Password wo set nahi karta — Cognito khud one-time password email karta hai. Dubara chalane par kuch nahi todta.
 
-**Step 4 — Credentials dena:** koi email/invite flow nahi hai — password tumhe khud securely dena padega (out-of-band).
+### Step 1 — Company banao (UI se, 30 second)
 
-**Step 5 — Login:** user `initiate-auth` se token leta hai (Chapter 6.6, **IdToken**) aur frontend mein paste karta hai.
+Platform operator se login karo → **Companies** → **Onboard a company**:
 
-**Step 6 — Isolation:** ab ABC ka har upload `tenant-abc-insurance/<uuid>` S3 key, us tenant ID ke DB rows, us tenant ID ke Qdrant points par jayega. Northwind ka user ise kabhi nahi dekh sakta.
+- Naam: `ABC Insurance Private Limited`
+- Tenant id: naam se slug apne-aap ban jaata hai (`abc-insurance-private-limited`), aur edit bhi kar sakte ho
+- Contact email: optional, sirf record ke liye — ye login **nahi** hai
 
-**Role badalna (promote to admin):**
+Reserved ids (`platform`, `admin`, `api`, `root`, `system`…) aur duplicate ids refuse hote hain.
+
+### Step 2 — Uska pehla admin invite karo
+
+Usi screen par step 2: email, naam, department. Role **select karne ko nahi milta** — ye screen sirf ek hi kism ka account banati hai (`admin`), taaki galti se platform operator na ban jaye.
+
+Cognito us admin ko one-time password email karta hai. **Tum wo password kabhi nahi dekhte.**
+
+### Step 3 — Admin apne users banata hai
+
+Wo admin login karta hai (pehle sign-in par apna password set karta hai), phir **Users** → **Invite a user**: email, naam, role (`user` ya `admin` — bas), department. Har invite par Cognito phir se one-time password email karta hai.
+
+### Step 4 — Isolation apne aap ho jaata hai
+
+ABC ka har upload `abc-insurance.../<uuid>` S3 key, us tenant id ke DB rows, aur us tenant id ke Qdrant points par jaata hai. Northwind ka user — ya Northwind ka **admin** — ise kabhi nahi dekh sakta. Jo platform operator ne ABC banayi, wo bhi ABC ke documents nahi khol sakta.
+
+### Role badalna
+
+Company ke apne **Users** page se: role dropdown badlo. Backend Cognito mein mirror karta hai aur `user.role_changed` audit event likhta hai — actor ke saath. CLI se bhi ho sakta hai, lekin phir audit trail nahi banta, isliye UI better hai.
 
 ```bash
+# CLI sirf inspection/repair ke liye
 aws cognito-idp admin-update-user-attributes --user-pool-id "$POOL" \
   --username user@abc-insurance.example --user-attributes Name=custom:role,Value=admin
 ```
 
-Naya role **agle login** (naye token) se lagega.
+Naya role **agle login** (naye token) se lagta hai.
 
 <div class="callout danger" markdown="1">
-`custom:tenant_id` **galat likhna = galat company ka data access**. Tenant ID ek baar set ho gaya to use mat badlo. Aur ek identity ek hi tenant mein honi chahiye.
+`custom:tenant_id` **galat likhna = galat company ka data access**. UI se banaye gaye users mein ye risk nahi hai (tenant token se aata hai, form se nahi) — lekin CLI se user banate waqt poori savdhani. Tenant ID ek baar set ho gaya to use mat badlo, aur ek identity ek hi tenant mein honi chahiye.
 </div>
 
 ## 7.4 Local mein users (no Cognito)
@@ -756,21 +854,27 @@ Naya role **agle login** (naye token) se lagega.
 
 | user_id | Tenant | Role | Email |
 |---|---|---|---|
+| `seed-platform-admin` | `platform` | platform_admin | `platform@ekba.example` |
 | `seed-user-a` | `seed-tenant-northwind` | user | `priya@northwind.example` |
-| `seed-admin-a` | `seed-tenant-northwind` | admin | — |
-| `seed-user-b` | `seed-tenant-contoso` | user | — |
-| `seed-admin-b` | `seed-tenant-contoso` | admin | — |
+| `seed-admin-a` | `seed-tenant-northwind` | admin | `admin@northwind.example` |
+| `seed-user-b` | `seed-tenant-contoso` | user | `jordan@contoso.example` |
+| `seed-admin-b` | `seed-tenant-contoso` | admin | `admin@contoso.example` |
 
-Token:
+Login: inme se koi bhi email + `.env` ka `DEV_AUTH_PASSWORD` (default `LocalDev!2026`). Yahi wahi email/password screen hai jo AWS par chalti hai — local mein `LocalIdentityProvider` HS256 token mint karta hai, AWS par Cognito RS256 deta hai, aur **application code ek hi rehta hai**.
+
+Token seedha chahiye ho to:
 
 ```bash
 cd backend
 python -m seeds.dev_token                                    # northwind user
 python -m seeds.dev_token --role admin --user seed-admin-a   # northwind admin
+python -m seeds.dev_token --role platform_admin              # platform operator
 python -m seeds.dev_token --tenant seed-tenant-contoso --user seed-admin-b --role admin
 ```
 
-Documents sirf northwind mein seed hote hain — contoso admin se login karke tenant isolation demo dikhta hai (documents khali, chat "not found").
+Isse "Developer sign-in" disclosure mein paste karo (sirf localhost par dikhta hai).
+
+Documents sirf northwind mein seed hote hain — contoso admin se login karke tenant isolation demo dikhta hai (documents khali, users list mein sirf contoso ke log, chat "not found").
 
 <div class="pagebreak"></div>
 
@@ -778,36 +882,47 @@ Documents sirf northwind mein seed hote hain — contoso admin se login karke te
 
 ## 8.1 Kaun kya kar sakta hai (code ke hisaab se)
 
-| Capability | USER | ADMIN | Code |
-|---|---|---|---|
-| Apne tenant ke documents dekhna (list/detail/status) | ✅ | ✅ | `documents.py` (rate-limited) |
-| Document **upload** | ✅ | ✅ | `POST /documents` — `UploadUser` (admin-only **nahi**) |
-| Document **download** (presigned URL, 5 min) | ✅ | ✅ | `GET /documents/{id}/download` |
-| Document **delete** | ✅ sirf apna (owner) | ✅ tenant ka koi bhi | `repositories.soft_delete_document` |
-| Knowledge chat (RAG) | ✅ | ✅ | `POST /chat` |
-| Agentic workflows | ✅ | ✅ | `/agents/*` (10/min) |
-| Feedback | ✅ | ✅ | `POST /feedback` |
-| AI metrics (`/admin/metrics`) | ❌ 403 | ✅ | `admin.py` |
-| Audit log (`/admin/audit`) | ❌ | ✅ | `admin.py` |
-| Security events (`/admin/security`) | ❌ | ✅ | `admin.py` |
-| Frontend admin pages (Users, Tenants, Documents, AI Metrics, Security, Audit, Deployments) | ❌ "Administrator access required" | ✅ | `components/admin.tsx → AdminOnly` |
-| Users create/manage | ❌ | ❌ — **app mein nahi**; Cognito CLI/console | — |
-| Tenant create/manage | ❌ | ❌ — **app mein nahi** | — |
-| Doosre tenant ka data | ❌ | ❌ — **admin bhi nahi** | `tenant-isolation.md` |
+| Capability | USER | ADMIN | PLATFORM_ADMIN | Code |
+|---|---|---|---|---|
+| Apne tenant ke documents dekhna (list/detail/status) | ✅ | ✅ | ❌ — platform tenant mein documents hi nahi | `documents.py` (rate-limited) |
+| Document **upload** | ✅ | ✅ | ❌ | `POST /documents` — `UploadUser` (admin-only **nahi**) |
+| Document **download** (presigned URL, 5 min) | ✅ | ✅ | ❌ | `GET /documents/{id}/download` |
+| Document **delete** | ✅ sirf apna (owner) | ✅ tenant ka koi bhi | ❌ | `repositories.soft_delete_document` |
+| Knowledge chat (RAG) | ✅ | ✅ | ❌ | `POST /chat` |
+| Agentic workflows | ✅ | ✅ | ❌ | `/agents/*` (10/min) |
+| Feedback | ✅ | ✅ | ❌ | `POST /feedback` |
+| AI metrics (`/admin/metrics`) | ❌ 403 | ✅ apne tenant ka | ❌ | `admin.py` |
+| Audit log (`/admin/audit`) | ❌ | ✅ apne tenant ka | ❌ | `admin.py` |
+| Security events (`/admin/security`) | ❌ | ✅ | ✅ | `admin.py` |
+| Apni company ka record (`/admin/tenant`) | ❌ | ✅ | ❌ | `admin.py` |
+| **Apni company ke users** — list, invite, role/department, deactivate, password reset | ❌ | ✅ | ❌ — operator company ki directory se bahar rehta hai | `admin.py` + `TenantAdminUser` |
+| **Nayi company banana** (`POST /platform/tenants`) | ❌ | ❌ **403** | ✅ | `platform.py` + `PlatformAdminUser` |
+| **Company ka pehla admin invite karna** | ❌ | ❌ | ✅ | `platform.py` |
+| Company registry dekhna (naam, id, seat counts) | ❌ | ❌ | ✅ | `db/control_plane.py` |
+| Onboarding trail (`/platform/audit`) | ❌ | ❌ | ✅ — sirf `tenant.*`/`user.*`/`platform.*` events | `platform.py` |
+| `platform_admin` role kisi ko dena | ❌ | ❌ — **schema hi reject karta hai (422)**, aur server dobara | ❌ — iski bhi koi API nahi | `onboarding.assert_role_assignable` |
+| Doosre tenant ka data | ❌ | ❌ — **admin bhi nahi** | ❌ — **operator bhi nahi** | `tenant-isolation.md` |
 
 <div class="callout info" markdown="1">
-**Admin ≠ super-user.** Admin ko sirf apne tenant ka operational data milta hai. Frontend button chhupana authorization nahi hai — API khud check karta hai (`AdminUser` dependency).
+**Admin ≠ super-user.** Admin ko sirf apne tenant ka operational data milta hai. Frontend button chhupana authorization nahi hai — API khud check karta hai (`AdminUser` / `TenantAdminUser` / `PlatformAdminUser` dependency). Frontend ke teen gates (`AdminOnly`, `TenantAdminOnly`, `PlatformAdminOnly`) exactly inhi teen dependencies ko mirror karte hain, taaki UI aur API kabhi disagree na karein.
 </div>
 
-## 8.2 Limits (dono roles par)
+<div class="callout warn" markdown="1">
+**Platform operator ≠ super-user bhi.** Company onboard karna us company ki chaabi nahi hai. Operator registry dekh sakta hai, content nahi — aur ye rule ka hissa hai, implementation detail nahi.
+</div>
+
+## 8.2 Limits (teeno roles par)
 
 | Limit | Value | Kahan |
 |---|---|---|
 | API requests | 20 / minute / user | Redis `ekba:rl:api:<tenant>:<user>` |
 | Agent (server) requests | 10 / minute | `ekba:rl:server:…` |
 | Uploads | 5 / minute (+ API bucket) | `ekba:rl:upload:…` |
+| **Sign-in / password reset** | 10 / minute / **account** | `ekba:rl:auth:<sha256 of account>` |
 | Upload size | 50 MB | `S3_UPLOAD_MAX_BYTES` |
 | Daily AI spend | $0.50 / user / din | `DAILY_COST_CEILING_USD` (`request_usage` table se) |
+
+Auth limit IP par **nahi**, account par hai — CloudFront + ALB ke peeche client IP ya to bahut logon mein shared hoti hai ya client khud bhejta hai, to IP-based limit galat logon ko rokti hai aur asli attacker ke liye bekaar hai. Account identifier Redis tak pahunchne se pehle hash ho jaata hai, isliye kisi key mein email nahi hoti.
 
 ## 8.3 Scenario
 
@@ -848,12 +963,16 @@ Next.js **15.1.3** (App Router) · React 19 · TypeScript (strict) · Tailwind C
 | `/departments` | sab | Department-wise documents |
 | `/usage` | sab (data admin ko) | Usage stats |
 | `/feedback` | sab | Feedback form |
-| `/admin/users` | admin | Samjhata hai users Cognito mein bante hain (**koi API nahi**) |
-| `/admin/tenants` | admin | Apne tenant ke metrics |
+| `/admin/users` | admin (tenant admin only) | **Apni company ke users** — invite, role/department, deactivate/reactivate, password reset |
+| `/admin/tenants` | admin | "My Company" — company record + seats + documents/chunks |
 | `/admin/documents` | admin | Read-only document list |
 | `/admin/metrics` | admin | AI metrics |
 | `/admin/security`, `/admin/audit` | admin | Events |
 | `/admin/deployments` | admin | Blue/green explanation + API health |
+| `/platform/tenants` | platform_admin | **Companies** — onboarding wizard (company → pehla admin) + registry, suspend/reactivate |
+| `/platform/audit` | platform_admin | Onboarding trail — saari companies ke lifecycle events |
+
+Nav **role-aware** hai: platform operator ko control plane dikhta hai aur chat/documents **nahi** — kyunki platform tenant mein content hi nahi hai. Ye chhupana security nahi hai; har route server par dobara authorize hota hai.
 
 Saare pages `"use client"` hain — data browser se API call karke aata hai. Server-side data fetching **nahi hai**, isliye static export sambhav hai.
 
@@ -861,11 +980,14 @@ Saare pages `"use client"` hain — data browser se API call karke aata hai. Ser
 
 ```text
 BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
-request(path) → headers: X-Correlation-ID (naya har request), Authorization: Bearer <token>
+request(path) → expiry 2 min door hai? → pehle silently refresh
+            → headers: X-Correlation-ID (naya har request), Authorization: Bearer <ID token>
             → fetch(BASE_URL + path)
             → network fail: "Could not reach the API. Is the backend running?"
-            → 401: token clear
+            → 401: ek baar refresh + retry; phir bhi 401 → token clear
 ```
+
+`rawRequest` (refresh logic ke bina) aur `request` (refresh ke saath) alag hain — warna refresh call khud refresh trigger karke infinite loop bana deta. FormData body wali request retry nahi hoti, kyunki stream dobara padhi nahi ja sakti.
 
 **`NEXT_PUBLIC_API_URL`:**
 
@@ -913,7 +1035,13 @@ flowchart TB
 |---|---|---|
 | `GET /health` | none | Liveness — `{"status":"ok","environment":…,"components":[]}` |
 | `GET /health/ready` | none | Postgres + Redis + Qdrant check; koi down → **503** |
-| `GET /me` | user | Token ka principal |
+| `GET /me` | user | Token ka principal + company ka naam |
+| `POST /auth/login` | none (10/min per account) | email + password → ID token, refresh token, ya `NEW_PASSWORD_REQUIRED` challenge |
+| `POST /auth/new-password` | none | Pehli baar sign-in — challenge poora karke session |
+| `POST /auth/refresh` | none | Refresh token → naya ID token |
+| `POST /auth/forgot-password` | none (10/min) | Reset code email; **hamesha 202** |
+| `POST /auth/confirm-password-reset` | none (10/min) | Code + naya password |
+| `POST /auth/logout` | user | Cognito global sign-out — saare live tokens revoke |
 | `POST /documents` | user (upload limit) | Upload |
 | `GET /documents` | user | List (limit ≤ 200) |
 | `GET /documents/{id}` · `/status` · `/download` | user | Detail, ingestion job, presigned URL |
@@ -922,8 +1050,22 @@ flowchart TB
 | `POST /feedback` | user | Feedback |
 | `GET /agents/workflows` · `POST /agents/run` | user (10/min) | Agentic workflows |
 | `GET /admin/metrics` · `/admin/audit` · `/admin/security` | admin | Operations |
+| `GET /admin/tenant` | admin | Apni company ka record (koi parameter nahi — sirf apni) |
+| `GET /admin/users` | **tenant admin** | Apni company ke users |
+| `POST /admin/users` | tenant admin | User invite (role: `user` ya `admin` hi) |
+| `PATCH /admin/users/{id}` | tenant admin | Role, department, active status |
+| `POST /admin/users/{id}/reset-password` | tenant admin | Cognito se one-time password email |
+| `POST /platform/tenants` | **platform_admin** | Nayi company |
+| `GET /platform/tenants` | platform_admin | Registry (platform tenant chhod kar) |
+| `GET /platform/tenants/{id}` · `PATCH` | platform_admin | Ek company; naam/contact/active status |
+| `POST /platform/tenants/{id}/admins` | platform_admin | Us company ka pehla admin invite |
+| `GET /platform/audit` | platform_admin | Onboarding trail (`tenant.*`/`user.*`/`platform.*` hi) |
 
 OpenAPI docs: `http://localhost:8000/docs` — **sirf dev mein** (`docs_url` dev ke bahar `None`).
+
+<div class="callout info" markdown="1">
+`/admin/users` ke liye `TenantAdminUser` chahiye, `AdminUser` nahi — matlab platform operator ko bhi 403 milta hai. Company onboard karne wala uski user directory se bahar rehta hai.
+</div>
 
 ## 10.3 Error format
 
@@ -946,8 +1088,8 @@ PostgreSQL 16, async SQLAlchemy 2.0 + `asyncpg`, migrations **Alembic**.
 
 | Table | Kya hai | Tenant column |
 |---|---|---|
-| `tenants` | Company (id, name, slug) | — (id khud tenant) |
-| `users` | User (cognito_sub, tenant_id, email, role, department) | ✅ FK |
+| `tenants` | Company (id, name, slug, contact_email, created_by) | — (id khud tenant) |
+| `users` | User (cognito_sub, tenant_id, email, role, department, invited_by) | ✅ FK |
 | `documents` | File metadata, status, chunk_count, S3 `source_uri` | ✅ |
 | `ingestion_jobs` | Processing job (status, progress, error) | ✅ |
 | `conversations` | Chat thread | ✅ |
@@ -1023,13 +1165,23 @@ erDiagram
 
 ## 11.5 Migrations
 
-Ek hi migration: `alembic/versions/0001_initial_schema.py`.
+Do migrations:
+
+| Revision | Kya karta hai |
+|---|---|
+| `0001_initial_schema` | Poora schema — 10 tables, enums, indexes |
+| `0002_platform_onboarding` | `PLATFORM_ADMIN` enum label, `tenants.contact_email`, `tenants.created_by`, `users.invited_by`, aur reserved `platform` tenant row |
 
 ```bash
 cd backend
 alembic upgrade head        # schema banao/update
 alembic current             # kaunsa revision laga hai
 ```
+
+`0002` **poori tarah additive** hai — koi column drop nahi, koi data rewrite nahi, isliye purana tenant/user/document/conversation data waisa hi rehta hai. Do detail dhyaan dene layak:
+
+- `ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'PLATFORM_ADMIN'` — PostgreSQL enum labels **UPPERCASE** hain (Python values lowercase), aur PG12+ par ye transaction-safe hai jab tak nayi label usi transaction mein use na ho.
+- Platform tenant `INSERT … ON CONFLICT (id) DO NOTHING` se aata hai, isliye migration dubara chalane par kuch nahi todta. Downgrade us tenant ko sirf tab delete karta hai jab usme koi user na ho.
 
 Naya column: `models.py` edit → `alembic revision --autogenerate -m "…"` → generated file review → `alembic upgrade head` → tests. **Applied migration kabhi edit mat karo.**
 
@@ -1332,7 +1484,7 @@ Ye 7 steps karta hai: prerequisites check → `.env` banana (generated secrets) 
 cp .env.example .env
 ```
 
-Chaar values set karo: `POSTGRES_PASSWORD`, `DATABASE_URL` (same password), `DEV_AUTH_SECRET` (32+ chars), `S3_BUCKET=ekba-dev-documents`. Local ke liye ye rehne do: `ENVIRONMENT=dev`, `AI_PROVIDER=local`, `DEV_AUTH_ENABLED=true`, `S3_ENDPOINT_URL=http://localhost:9000`.
+Paanch values set karo: `POSTGRES_PASSWORD`, `DATABASE_URL` (same password), `DEV_AUTH_SECRET` (32+ chars), `DEV_AUTH_PASSWORD` (jo password se tum local accounts mein login karoge), `S3_BUCKET=ekba-dev-documents`. Local ke liye ye rehne do: `ENVIRONMENT=dev`, `AI_PROVIDER=local`, `DEV_AUTH_ENABLED=true`, `S3_ENDPOINT_URL=http://localhost:9000`, `RATE_LIMIT_AUTH_ATTEMPTS_PER_MIN=10`.
 
 **Step 2 — Containers**
 
@@ -1358,8 +1510,16 @@ pip install -r requirements.txt -r requirements-dev.txt
 **Step 5 — Demo data** → `python -m seeds.seed` (output mein `chunks_indexed: 41`)
 **Step 6 — Backend** → `uvicorn app.main:app --reload --port 8000`
 **Step 7 — Frontend** (naya terminal) → `cd frontend && npm install && npm run dev`
-**Step 8 — Token** → `cd backend && python -m seeds.dev_token` (admin: `--role admin --user seed-admin-a`)
-**Step 9 — Kholo** → `http://localhost:3000`, token paste karo.
+**Step 8 — Kholo** → `http://localhost:3000`, aur kisi bhi seeded email + `DEV_AUTH_PASSWORD` se login karo:
+
+| Email | Role |
+|---|---|
+| `priya@northwind.example` | user |
+| `admin@northwind.example` | company admin |
+| `platform@ekba.example` | platform operator |
+| `admin@contoso.example` | doosri company ka admin (isolation demo) |
+
+**Step 9 (optional) — Token chahiye to** → `cd backend && python -m seeds.dev_token [--role admin|platform_admin]`, phir sign-in page par "Developer sign-in" kholo aur paste karo.
 
 ## 18.4 Check, logs, docs
 
@@ -1420,7 +1580,7 @@ flowchart TB
 flowchart TB
     subgraph D1[Laptop par]
       direction LR
-      DEV[./scripts/deploy.sh] --> P1[Preflight<br/>+ cost guard] --> P2[Local gate<br/>ruff + 190 tests + typecheck]
+      DEV[./scripts/deploy.sh] --> P1[Preflight<br/>+ cost guard] --> P2[Local gate<br/>ruff + 279 tests + typecheck]
     end
     subgraph D2[AWS par]
       direction LR
@@ -1724,12 +1884,13 @@ Required GitHub settings (deploy.yml ke liye): repo variables `AWS_REGION`, `EXP
 | Backend lint | `ruff check app tests seeds` · `ruff format --check app tests seeds` | `backend/` |
 | Unit | `pytest tests/unit -q` | mocks, no services |
 | Integration | `pytest tests/integration -q` | API smoke, RAG pipeline |
-| Security | `pytest tests/security -q` | tenant isolation, guardrails, platform security, agent isolation |
+| Security | `pytest tests/security -q` | tenant isolation, guardrails, platform security, agent isolation, **role hierarchy** |
 | Evaluation | `pytest tests/evaluation -q` | RAG quality harness |
-| Sab ek saath (deploy gate) | `ENVIRONMENT=dev AI_PROVIDER=local DEV_AUTH_ENABLED=true pytest tests/unit tests/integration tests/security tests/evaluation -q` → **190 tests** | `deploy.sh` |
+| Onboarding journey | `pytest tests/e2e -q` | Do companies onboard karke isolation prove karta hai (**PostgreSQL chahiye**) |
+| Sab ek saath (deploy gate) | `ENVIRONMENT=dev AI_PROVIDER=local DEV_AUTH_ENABLED=true pytest tests/unit tests/integration tests/security tests/evaluation -q` → **279 tests** | `deploy.sh` |
 | Frontend | `npm run lint` · `npm run typecheck` · `npm run build` | `frontend/` |
 | Amplify jaisa build | `NEXT_OUTPUT_MODE=export NEXT_PUBLIC_API_URL=https://x.invalid npm run build` | `frontend/` |
-| E2E (Playwright, 15 journeys) | `./scripts/test-e2e.sh` (tokens khud banata hai) ya `npx playwright test` | local stack chahiye |
+| E2E (Playwright, 29 journeys) | `./scripts/test-e2e.sh` (tokens khud banata hai) ya `npx playwright test` | local stack chahiye |
 | Cost-guard Lambda | `backend/.venv/Scripts/python.exe -m pytest infra/terraform/modules/cost-guard/lambda/tests -q` (27) | repo root |
 | Terraform | `terraform fmt -check -recursive infra/terraform` · `terraform -chdir=… validate` | |
 
@@ -1749,7 +1910,7 @@ flowchart LR
     P -->|API error| B1[CloudFront URL<br/>/api/v1/health] --> B2[ALB target<br/>health] --> B3[ECS service<br/>events] --> B4[CloudWatch<br/>/ekba/dev/service]
     P -->|Deploy fail| C1[deploy.sh<br/>output] --> C2[Terraform<br/>plan/apply error] --> C3[CodeDeploy<br/>lifecycle events] --> C4[docs/reports/*]
     P -->|RAG galat/khali| D1[backend logs<br/>rag_answered, bedrock_*] --> D2[Qdrant<br/>points_count] --> D3[Bedrock quota]
-    P -->|Login fail| E1[Browser:<br/>kaunsa token?] --> E2[backend logs<br/>auth.* events] --> E3[Cognito user<br/>attributes]
+    P -->|Login fail| E1[Credentials, challenge<br/>ya rate limit?] --> E2[backend logs<br/>auth.* events] --> E3[Cognito user<br/>status + attributes]
 ```
 
 **Correlation ID:** har request ka `X-Correlation-ID` frontend banata hai; backend har log line, error response aur audit event mein wahi ID rakhta hai. Error ke `correlation_id` se logs mein search karo.
@@ -1773,7 +1934,7 @@ MSYS_NO_PATHCONV=1 aws logs filter-log-events --log-group-name /ekba/dev/service
 flowchart LR
     X{Kya<br/>toota?} -->|UI nahi khul raha| U1[Amplify<br/>job status] --> U2[Build logs:<br/>kaunsa step fail?]
     X -->|API error / 5xx| A1[CloudFront<br/>/api/v1/health] --> A2{502/504?} -->|haan| A3[ALB exists?<br/>SG CloudFront rule?] --> A4[Target health<br/>ECS stoppedReason]
-    X -->|Login error| L1[Kaunsa token<br/>paste kiya: ID?] --> L2[Backend log<br/>auth.* reason] --> L3[Cognito user<br/>attributes]
+    X -->|Login error| L1[Password galat,<br/>challenge, ya 429?] --> L2[Backend log<br/>auth.* reason] --> L3[Cognito user<br/>status + attributes]
     X -->|Upload error| P1[Response code<br/>413 / 415 / 429?] --> P2[S3 / MinIO<br/>reachable?] --> P3[Job status<br/>+ logs]
     X -->|RAG khali/galat| R1[Doc status<br/>ready?] --> R2[Qdrant<br/>points_count] --> R3[Bedrock quota /<br/>throttling] --> R4[Threshold /<br/>department filter]
     X -->|Deploy fail| D1[deploy.sh ka<br/>kaunsa stage?] --> D2[Docker / ECR /<br/>Terraform plan] --> D3[CodeDeploy<br/>events] --> D4[verify.sh:<br/>IP badla?]
@@ -1822,11 +1983,18 @@ flowchart LR
 
 | Problem | Check | Possible cause | Fix |
 |---|---|---|---|
-| "Token is missing a tenant assignment." | Token decode (jwt.io jaisa tool **mat use karo** real token ke liye; locally `python -c` se) | Access token paste kiya / user par `custom:tenant_id` nahi | **ID token** use karo; attribute set karo |
+| "Incorrect email or password." | Backend log `auth.signin_failed` | Account exist nahi karta, ya password galat — message **jaan-boojh kar dono ke liye same** hai (account enumeration se bachne ke liye) | Local: `python -m seeds.seed` chalao aur `DEV_AUTH_PASSWORD` use karo. AWS: Cognito mein user status check karo |
+| "Too many attempts. Try again shortly." | `Retry-After` header | Ek account par 10 sign-in attempts/min | Ek minute ruko. Limit IP par nahi, account par hai |
+| Pehli baar login par "Set your password" screen | — | Ye **expected** hai — invitation ka one-time password ek challenge credential hai, session nahi | Naya password set karo (12+ chars, mixed case, number, symbol) |
+| "Token carries an inconsistent tenant assignment." | Backend log `auth.platform_role_tenant_mismatch` (critical) | Token mein `platform_admin` + normal tenant, ya normal role + `platform` tenant | Expected behaviour. `--role platform_admin` bina `--tenant` ke use karo |
+| "Token is missing a tenant assignment." | Token decode (jwt.io jaisa tool **mat use karo** real token ke liye; locally `python -c` se) | Access token use hua / user par `custom:tenant_id` nahi | **ID token** use karo (Chapter 6.6); attribute set karo |
 | "Invalid token." | Backend log `auth.invalid_token` / `auth.bad_audience` / `auth.bad_issuer` | Galat pool/client, dev token AWS par | `COGNITO_USER_POOL_ID` / client ID match |
-| "Token has expired." | — | 1 ghanta (Cognito) / 12 ghante (dev) | Naya token |
+| "Token has expired." | — | 1 ghanta (Cognito) / 12 ghante (dev). Real session khud renew hoti hai | Refresh token gaya to dobara login |
 | "Authentication is not configured." | — | `COGNITO_USER_POOL_ID` khali aur dev auth off | Env set karo |
-| 403 admin page | — | Role `user` | `custom:role=admin`, naya token |
+| 403 admin page | — | Role `user` | `custom:role=admin`, naya login |
+| Companies pages nahi dikh rahe | `/api/v1/me` ka `role` | Tum `admin` ho, `platform_admin` nahi | Platform operator se login karo |
+| Platform operator ko `/admin/users` par 403 | — | Expected — operator company ki user directory se bahar rehta hai | Company ke apne admin se login karo |
+| Invite bheja par email nahi aaya | Cognito → Users mein status `FORCE_CHANGE_PASSWORD`? | Cognito default email sandbox limits; SES configure nahi | Cognito console se resend; production ke liye SES |
 
 **Data / RAG**
 
@@ -1865,8 +2033,12 @@ flowchart LR
 
 | Control | Implementation | File |
 |---|---|---|
-| Authentication | Cognito RS256 JWT (signature, issuer, audience, expiry); dev HS256 sirf dev mein | `core/auth.py` |
-| Authorization | Roles `user`/`admin`; admin endpoints `AdminUser` dependency | `api/deps.py` |
+| Authentication | Cognito RS256 JWT (signature, issuer, audience, expiry); dev HS256 sirf dev mein. Sign-in email+password, invitation-only accounts, generic failure message | `core/auth.py`, `api/v1/auth.py`, `services/identity.py` |
+| Authorization | Roles `user`/`admin`/`platform_admin`; `AdminUser` / `TenantAdminUser` / `PlatformAdminUser` dependencies | `api/deps.py` |
+| Privilege escalation | `platform_admin` kisi bhi request schema mein valid value nahi (422), aur `assert_role_assignable` server par dobara refuse karta hai. Platform role aur platform tenant token verify par ek doosre se bandhe hain | `schemas.py`, `services/onboarding.py`, `core/auth.py` |
+| Cross-tenant admin view | Ekmatra jagah: company registry. Sirf `PlatformAdminUser`, sirf registry data, har mutation audited | `db/control_plane.py` |
+| Credential handling | App password set/store/log/return **kabhi nahi** karta; Cognito one-time password email karta hai; deactivate par live tokens revoke | `services/identity.py` |
+| Lockout protection | Admin apna role/status nahi badal sakta; company ka last active admin nahi hataya ja sakta | `services/onboarding.py` |
 | Tenant isolation | Token se tenant; har DB query, Qdrant search (mandatory filter), S3 prefix check, cache key mein tenant | `repositories.py`, `vector.py`, `storage.py`, `cache.py` |
 | Cross-tenant attempt | 404/403 response + **critical** audit event `tenant.cross_tenant_document_access` | `repositories.require_document` |
 | Prompt injection | 10 pattern families + invisible chars + encoded blobs; block par audit | `security/injection.py` |
@@ -1874,7 +2046,7 @@ flowchart LR
 | Output guardrail | System prompt leak, AWS key, private key, JWT, script/iframe/js URI block | `rag/guardrails.py` |
 | Citation validation | Invented/foreign-tenant citations hatao | `rag/guardrails.py` |
 | File upload | Allow-list, magic bytes, 50 MB, server-generated key, sanitized name | `security/files.py` |
-| Rate limits | 20 / 10 / 5 per minute per user (Redis) → 429 | `core/ratelimit.py` |
+| Rate limits | 20 / 10 / 5 per minute per user, aur 10 sign-in attempts/min per **account** (hashed key) → 429 | `core/ratelimit.py` |
 | Headers (API) | Security headers middleware | `core/middleware.py` |
 | Headers (site) | HSTS, nosniff, DENY, no-referrer, CSP | Amplify (`modules/frontend`) |
 | CORS | Explicit allow-list (never `*`) | `main.py` + `CORS_ALLOWED_ORIGINS` |
@@ -2077,10 +2249,11 @@ Ye story **currently supported** steps use karti hai. AWS par step 10 aur 20 abh
 
 | # | Kya hota hai | Kaun/kahan |
 |---|---|---|
-| 1 | Tenant ID choose: `tenant-abc-insurance` | Tum (koi API nahi) |
-| 2 | Admin banao: `admin-create-user` with `custom:tenant_id`, `custom:role=admin` | Cognito CLI |
-| 3 | Password set, admin ko out-of-band do | `admin-set-user-password` |
-| 4 | Admin **ID token** leta hai, frontend mein paste | `initiate-auth` → sign-in box |
+| 0 | Pehla platform operator banao (poore system mein ek hi baar) | `./scripts/bootstrap-platform-admin.sh --email ops@…` |
+| 1 | Operator login karta hai, pehle sign-in par apna password set karta hai | Frontend → `/auth/login` → `/auth/new-password` |
+| 2 | **Companies → Onboard a company**: "ABC Insurance Private Limited", tenant id `abc-insurance` | `POST /api/v1/platform/tenants` |
+| 3 | **Invite admin**: `admin@abc-insurance.example`. Cognito one-time password email karta hai — operator wo password kabhi nahi dekhta | `POST /platform/tenants/abc-insurance/admins` |
+| 4 | Admin login karta hai, apna password set karta hai, apne users banata hai (HR / Finance / Legal) | `POST /api/v1/admin/users` |
 | 5 | Documents page → "HR Maternity Policy.pdf" upload (dept `hr`) | `POST /api/v1/documents` |
 | 6 | File S3: `tenant-abc-insurance/<uuid>.pdf` (SSE) | `storage.put_object` |
 | 7 | Rows: `documents` pending, `ingestion_jobs` queued, audit `document.uploaded` | Postgres (AWS: RDS — ye rows task restart ke baad bhi rehti hain) |
@@ -2089,8 +2262,8 @@ Ye story **currently supported** steps use karti hai. AWS par step 10 aur 20 abh
 | 10 | Embeddings (Titan v2, batch 25) | Bedrock |
 | 11 | Qdrant upsert — har point par `tenant_id=tenant-abc-insurance` | `vector.upsert_chunks` |
 | 12 | Document `ready`, `chunk_count` set, cache invalidate | Postgres (RDS), Redis |
-| 13 | User banao (`custom:role=user`) | Cognito CLI |
-| 14 | User login (ID token paste) | Frontend |
+| 13 | (Users step 4 mein hi ban gaye — admin ke Users page se) | `POST /api/v1/admin/users` |
+| 14 | User email + password se login karta hai | Frontend → `/auth/login` |
 | 15 | Sawaal: "Meri maternity leave policy kya hai?" | Chat page → `POST /api/v1/chat` |
 | 16 | JWT verify → `tenant_id=tenant-abc-insurance`, role user | `core/auth.py` |
 | 17 | Validation + injection scan + embed + cache lookup (ABC namespace) | pipeline stages 2–4 |
@@ -2100,9 +2273,10 @@ Ye story **currently supported** steps use karti hai. AWS par step 10 aur 20 abh
 | 21 | Usage + conversation save; answer (language of question) + `[S1]` → "HR Maternity Policy.pdf, page N" | `chat.py` |
 | 22 | Frontend answer, citations, confidence, model, tokens, cost dikhata hai | `app/chat/page.tsx` |
 
-**ADMIN kar sakta:** upload, tenant ka koi bhi document delete, chat, workflows, AI metrics, audit, security events.
+**PLATFORM OPERATOR kar sakta:** companies banana, unka pehla admin invite karna, registry aur onboarding trail dekhna, company suspend/reactivate karna.
+**ADMIN kar sakta:** apni company ke users invite/manage karna (role, department, deactivate, password reset), upload, tenant ka koi bhi document delete, chat, workflows, AI metrics, audit, security events.
 **USER kar sakta:** upload, apna document delete, chat, workflows, feedback. Admin pages nahi.
-**Koi nahi kar sakta (app mein):** users/tenants manage karna, doosre tenant ka data dekhna.
+**Koi nahi kar sakta:** doosre tenant ka data dekhna — na admin, na platform operator. Aur `platform_admin` role kisi bhi API se nahi mil sakta.
 
 <div class="pagebreak"></div>
 
@@ -2126,7 +2300,8 @@ Sab commands **repo root** (`D:\infy__masters`) se, Git Bash mein — jab tak `c
 | Seed data | `cd backend && python -m seeds.seed` |
 | Backend run | `cd backend && uvicorn app.main:app --reload --port 8000` |
 | Frontend run | `cd frontend && npm run dev` |
-| Dev token (user / admin) | `cd backend && python -m seeds.dev_token` / `… --role admin --user seed-admin-a` |
+| Login | Browser: seeded email + `.env` ka `DEV_AUTH_PASSWORD` |
+| Dev token (user / admin / platform) | `cd backend && python -m seeds.dev_token` / `… --role admin --user seed-admin-a` / `… --role platform_admin` |
 | Health | `curl localhost:8000/api/v1/health` · `curl localhost:8000/api/v1/health/ready` |
 
 **Testing**
@@ -2136,6 +2311,7 @@ Sab commands **repo root** (`D:\infy__masters`) se, Git Bash mein — jab tak `c
 | Backend lint + format | `cd backend && ruff check . && ruff format --check .` |
 | Backend sab tests | `cd backend && ENVIRONMENT=dev AI_PROVIDER=local DEV_AUTH_ENABLED=true pytest tests/unit tests/integration tests/security tests/evaluation -q` |
 | Sirf security | `cd backend && pytest tests/security -q` |
+| Onboarding journey | `cd backend && pytest tests/e2e -q` (PostgreSQL chahiye) |
 | Frontend | `cd frontend && npm run lint && npm run typecheck && npm run build` (dev server band karke) |
 | Cost-guard Lambda | `backend/.venv/Scripts/python.exe -m pytest infra/terraform/modules/cost-guard/lambda/tests -q` |
 
@@ -2144,6 +2320,7 @@ Sab commands **repo root** (`D:\infy__masters`) se, Git Bash mein — jab tak `c
 | Kaam | Command |
 |---|---|
 | Kharcha + kya chal raha hai | `./scripts/cost-check.sh` |
+| Pehla platform operator | `./scripts/bootstrap-platform-admin.sh --email ops@… [--dry-run]` |
 | Backend deploy | `./scripts/deploy.sh` |
 | Verify | `./scripts/verify.sh` |
 | Seed (AWS) | `./scripts/seed.sh` |
@@ -2224,10 +2401,15 @@ Sab commands **repo root** (`D:\infy__masters`) se, Git Bash mein — jab tak `c
 | Database sirf ek chhota instance kyun? | $20 ceiling. Single-AZ `db.t4g.micro` ~$14/month 24/7, isliye wo ephemeral stack ke saath hi rehta hai aur `destroy.sh` snapshot le leta hai. Production mein Multi-AZ + read replica + ElastiCache |
 | Scale kaise? | Stateless API ke multiple tasks; managed DB/Qdrant Cloud; ingestion ko SQS worker mein nikalna |
 | Biggest challenge? | CodeDeploy Free plan block; IP change par health fail; Amplify monorepo headers — har ek ka root cause dhoondha |
-| Kya improve karoge? | Hosted UI login + refresh, tenant/user admin API, SQS ingestion worker, WAF + custom domain, `main`-based CI/CD |
+| Multi-tenancy kaise onboard hoti hai? | Teen-level hierarchy: `platform_admin` company banata hai aur uska pehla admin invite karta hai; wo admin sirf apni company ke users manage karta hai. Har level sirf apne se ek neeche wale ko bana sakta hai |
+| Tenant admin ko platform admin banne se kaise roka? | Chaar layers: role schema mein hi valid value nahi (422), `TENANT_ASSIGNABLE_ROLES` mein nahi, server-side `assert_role_assignable` refuse karta hai, aur token verify par platform role sirf `platform` tenant ke saath valid hai. Koi API platform role de hi nahi sakti |
+| Platform admin tenant isolation ko tod nahi deta? | Nahi — wo apne reserved `platform` tenant mein rehta hai (jisme content nahi hai), aur uska ekmatra cross-tenant access `control_plane.py` hai: sirf registry data (naam, id, seat counts), koi document/chat/metric nahi, aur har mutation audited |
+| Password kaise handle karte ho? | Karte hi nahi. Cognito one-time password email karta hai, user pehle sign-in par apna set karta hai. App password set/store/log/return kabhi nahi karta, aur task role ke paas `AdminSetUserPassword` hi nahi hai |
+| Login ko brute force se kaise bachaya? | Per-account 10 attempts/min (IP par nahi — CloudFront ke peeche IP shared ya client-supplied hoti hai), generic failure message, aur forgot-password hamesha 202 |
+| Kya improve karoge? | SES se branded invitation emails, MFA (pool `OFF` par hai), SCIM/SSO se bulk user provisioning, SQS ingestion worker, WAF + custom domain, `main`-based CI/CD |
 
 <div class="callout warn" markdown="1">
-Interview mein **wahi bolo jo implemented hai**. "Async workers", "LangSmith tracing", "Cognito hosted UI login" — ye abhi **implemented nahi** hain; poochha jaye to "planned" bolo.
+Interview mein **wahi bolo jo implemented hai**. "Async workers (separate queue)", "LangSmith tracing", "Cognito hosted UI", "MFA" — ye abhi **implemented nahi** hain; poochha jaye to "planned" bolo. Login, refresh, aur tenant/user admin APIs **implemented hain**.
 </div>
 
 <div class="pagebreak"></div>
@@ -2311,7 +2493,9 @@ Interview mein **wahi bolo jo implemented hai**. "Async workers", "LangSmith tra
 | **Local** | Frontend `http://localhost:3000` · API `http://localhost:8000` · Docs `/docs` · Qdrant `:6333/dashboard` · MinIO `:9001` |
 | **Region / states** | `us-west-2` · baseline, cost-guard, dev, frontend |
 | **Release branch** | `aws-deployment` (Amplify) · CI `main` par |
-| **Token** | Cognito **ID token** (AWS) · `python -m seeds.dev_token` (local) |
+| **Login** | Email + password (dono jagah). Local password: `.env` ka `DEV_AUTH_PASSWORD` |
+| **Token** | Cognito **ID token**, `/auth/login` se — frontend khud manage karta hai. Debug ke liye `python -m seeds.dev_token` (local only) |
+| **Pehla operator** | `./scripts/bootstrap-platform-admin.sh --email …` (iski koi API nahi hai) |
 | **Cost guard** | `DRY_RUN=true` · $18 gross shutdown · card > $0.01 · 8 ghante |
 
 **Roz ka flow**
@@ -2343,9 +2527,10 @@ Interview mein **wahi bolo jo implemented hai**. "Async workers", "LangSmith tra
 | Kaam | Chapter | Kaam | Chapter |
 |---|---|---|---|
 | Project local start | 18 | Backend change / deploy | 20.1 / 19.2 |
-| Users banana / use karna | 7, 6 | Logs dekhna | 27 |
-| Admin vs user | 8 | API troubleshoot | 28.2 |
-| Document add karna | 12, 32 | Cognito / login troubleshoot | 6.6, 28.2 |
+| Company onboard karna | 7.3 | Logs dekhna | 27 |
+| Users banana / use karna | 7, 6 | Login / password troubleshoot | 28.2 (Auth) |
+| Role hierarchy samajhna | 2.2, 8.1 | API troubleshoot | 28.2 |
+| Document add karna | 12, 32 | Cognito / ID token | 6.6, 28.2 |
 | Data kahan jaata hai | 17 | Qdrant troubleshoot | 15, 28.2 |
 | Sawaal poochna | 13.1, 32 | Frontend / backend stop | 18.5, 22, 22.5 |
 | RAG flow samajhna | 13 | AWS band karna | 22 |

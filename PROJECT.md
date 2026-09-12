@@ -264,14 +264,50 @@ validation, HTTPS, encrypted S3, private database and networking, non-root
 containers, ECR scanning, AWS Secrets Manager.
 
 ### Roles
-- `user`
-- `admin`
+- `user` — an employee of a customer company.
+- `admin` — that company's own administrator.
+- `platform_admin` — the service provider. Lives in the reserved `platform`
+  tenant, which holds operators and no content.
+
+### Onboarding hierarchy
+
+```
+Platform operator (platform_admin, tenant "platform")
+  └── creates a company          ──> tenant row + audited event
+        └── invites its first admin (role=admin, that tenant)
+              └── creates its own users (role=user or admin, same tenant)
+```
+
+Each step is only available one level up, and never sideways or downward into
+another company. The rules that make it hold:
+
+1. Only `platform_admin` may create a company.
+2. `admin` manages users **only inside its own company**, and may assign only
+   `user` or `admin`.
+3. `admin` can never create a company, and can never create or become a
+   `platform_admin`.
+4. `user` manages nothing.
+5. The platform role and the `platform` tenant imply each other at token
+   verification, so neither half can be forged alone.
+6. No API grants `platform_admin`. The first operator is created out of band by
+   `scripts/bootstrap-platform-admin.sh`.
+7. A company can never be left with no active administrator.
 
 ### Access rules
 1. Users only access documents in tenants they are authorized for.
-2. Admins can access operational metrics.
+2. Admins can access operational metrics for their own company.
 3. Document deletion requires ownership or explicit authorization.
 4. Every RAG query applies `tenant_id` filtering.
+5. `platform_admin` sees the company **registry** — names, ids, seat counts and
+   the onboarding trail — and never a company's documents, conversations,
+   metrics or chat. The registry lives in one module (`app/db/control_plane.py`)
+   behind one dependency, and every mutation is audited under the target tenant.
+
+### Authentication flow
+Sign-in is email and password against the Cognito user pool, proxied through the
+API so local development exercises the same path. Accounts are created by
+invitation only: Cognito emails a one-time password and the invitee replaces it
+on first sign-in. The application never sets, stores, logs or returns a password.
 
 ---
 
@@ -282,6 +318,10 @@ containers, ECR scanning, AWS Secrets Manager.
 | API requests | 20 / minute / user |
 | Server-side requests | 10 / minute / user |
 | Document uploads | 5 / minute / user |
+| Sign-in / password reset | 10 / minute / account |
+
+The auth bucket is keyed by a hash of the account identifier rather than the IP:
+behind CloudFront and an ALB the client IP is shared or client-supplied.
 
 ---
 
@@ -309,15 +349,27 @@ Datasets live in [evaluation/datasets/](evaluation/datasets/).
 **Landing / first page — "Enterprise Knowledge AI"** shows: search/chat,
 documents, departments, recent queries, usage, confidence, citations.
 
-| User pages | Admin pages |
-|---|---|
-| Dashboard | Users |
-| Knowledge Chat | Tenants |
-| Documents | Documents |
-| Departments | AI Metrics |
-| Usage | Security |
-| Feedback | Audit Logs |
-| | Deployments |
+| User pages | Company admin pages | Platform pages |
+|---|---|---|
+| Dashboard | Users | Companies |
+| Knowledge Chat | My Company | Onboarding Trail |
+| Documents | Documents | Security |
+| Departments | AI Metrics | Deployments |
+| Usage | Security | |
+| Feedback | Audit Logs | |
+| | Deployments | |
+
+Navigation is role-aware: a platform operator sees the control plane and no chat
+or documents, because the platform tenant holds none. Hiding a page is a
+convenience, never the boundary — every route is authorized again server-side,
+and each frontend gate mirrors exactly one backend dependency
+(`AdminOnly`/`AdminUser`, `TenantAdminOnly`/`TenantAdminUser`,
+`PlatformAdminOnly`/`PlatformAdminUser`).
+
+The sign-in page asks for an email and a password, handles the first-sign-in
+password challenge and password recovery, renews the session silently, and
+revokes it server-side on sign-out. A paste-a-token box exists for local
+debugging only and renders solely when the API is localhost.
 
 Development data is seeded so no dashboard renders empty.
 
@@ -546,17 +598,20 @@ citation validation, relevance threshold, semantic cache, model routing,
 reranking, token and cost tracking. LangGraph agentic workflows including policy
 comparison. The full security test suite. The evaluation harness and baseline.
 
-**Exit:** all 17 mandatory security tests pass; evaluation baseline recorded.
+**Exit:** all 23 mandatory security tests pass (17 platform + the 6 role-hierarchy
+tests added with onboarding); evaluation baseline recorded.
 
 ---
 
 ### Phase 4 — Frontend · local · $0
 Next.js with TypeScript, Tailwind, and shadcn/ui. The Enterprise Knowledge AI
-landing page. Six user pages and seven admin pages. Chat with streaming,
+landing page. Six user pages, seven company-admin pages and the platform control
+plane. Email/password sign-in with the first-sign-in challenge, password
+recovery, silent renewal and server-side sign-out. Chat with streaming,
 citations, and confidence. Document upload with live ingestion status. Voice input
 through Transcribe into the existing pipeline. Seeded demo data. Playwright E2E.
 
-**Exit:** both dashboards visibly functional with real seeded data; E2E green.
+**Exit:** all three dashboards visibly functional with real seeded data; E2E green.
 
 ---
 
@@ -598,7 +653,7 @@ That leaves roughly $16 of the $20 ceiling for demos and interview walkthroughs.
   explainable in an interview.
 - Build and test locally first, then deploy to AWS.
 - Seed demo data.
-- User and admin dashboards must be visibly functional.
+- User, company-admin and platform dashboards must be visibly functional.
 - Generate test and verification reports into [docs/reports/](docs/reports/).
 - Proceed Phase 0 through Phase 5 in order.
 
@@ -615,23 +670,27 @@ That leaves roughly $16 of the $20 ceiling for demos and interview walkthroughs.
 │   └── skills/                 # operational workflows (deploy, verify, ...)
 ├── backend/                    # FastAPI + LangGraph service
 │   ├── app/
-│   │   ├── api/v1/             # HTTP routes
-│   │   ├── core/               # config, auth, logging, correlation ID
-│   │   ├── db/models/          # SQLAlchemy models
+│   │   ├── api/v1/             # HTTP routes (incl. auth, admin, platform)
+│   │   ├── core/               # config, auth, context, logging, correlation ID
+│   │   ├── db/                 # SQLAlchemy models, tenant-filtered repositories,
+│   │   │                       #   and control_plane (the one audited registry)
 │   │   ├── schemas/            # Pydantic contracts
 │   │   ├── services/
+│   │   │   ├── identity.py     # Cognito admin + dev-local identity provider
+│   │   │   ├── onboarding.py   # role/tenant guard functions (pure, DB-free)
 │   │   │   ├── ingestion/      # multimodal extract -> chunk -> embed
 │   │   │   ├── rag/            # retrieval, rerank, citation, model routing
 │   │   │   ├── agents/         # LangGraph workflows
 │   │   │   ├── security/       # injection scan, guardrails, validation
 │   │   │   └── observability/  # metrics, cost, LangSmith
 │   │   └── workers/            # async ingestion jobs
-│   ├── alembic/                # migrations
+│   ├── alembic/                # migrations (0001 schema, 0002 onboarding)
 │   ├── seeds/                  # demo data
-│   └── tests/                  # unit | integration | security | evaluation
+│   └── tests/                  # unit | integration | security | evaluation | e2e
 ├── frontend/                   # Next.js dashboard
 │   ├── src/app/(user)/         # dashboard, chat, documents, departments, usage, feedback
-│   ├── src/app/(admin)/        # users, tenants, documents, metrics, security, audit, deployments
+│   ├── src/app/admin/          # users, my company, documents, metrics, security, audit, deployments
+│   ├── src/app/platform/       # companies (onboarding), onboarding trail
 │   └── tests/e2e/              # Playwright
 ├── infra/
 │   ├── terraform/

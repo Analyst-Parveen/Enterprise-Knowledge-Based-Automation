@@ -55,7 +55,11 @@ prefix + `ProjectCode=ekba` tag). Report anything ambiguous; touch nothing.
 - Networking: private subnets, security groups, no unintended public exposure.
 - S3: public access blocked, encryption on, versioning as configured.
 - IAM roles exist and are scoped, with no wildcard grants beyond the documented
-  exceptions.
+  exceptions. The ECS task role's Cognito grant is the one to look at closely: it
+  holds only the admin actions the invitation flow needs, pinned to this
+  project's own user pool ARN, and must **not** include `AdminSetUserPassword` or
+  `AdminDeleteUser` — the application must not be able to choose someone's
+  password or erase an identity.
 - Secrets exist in Secrets Manager. **Verify presence and metadata only — never
   read or print a secret value.**
 
@@ -76,7 +80,14 @@ prefix + `ProjectCode=ekba` tag). Report anything ambiguous; touch nothing.
 - Security headers present: HSTS, `X-Content-Type-Options`, `X-Frame-Options`,
   `Referrer-Policy`, CSP.
 - CORS reflects the allow-list only.
-- Rate limiting returns 429 at the configured thresholds (20 / 10 / 5 per minute).
+- Rate limiting returns 429 at the configured thresholds (20 / 10 / 5 per minute,
+  and 10 sign-in attempts per minute per account).
+- Sign-in works against the real user pool: `POST /api/v1/auth/login` with a
+  known account returns a session, and a wrong password returns one generic
+  message that does not reveal whether the account exists. Never record the
+  credential used, in the report or anywhere else.
+- The platform routes refuse a tenant role: a company admin's token gets 403 from
+  `GET /api/v1/platform/tenants`.
 
 ## Step 5 — AI pipeline
 

@@ -3,7 +3,23 @@
  * Kept in sync with backend/app/schemas.py by hand - see coding-standards.md.
  */
 
-export type Role = "user" | "admin";
+/**
+ * Three roles. `platform_admin` is the service provider operating the platform;
+ * `admin` administers one company; `user` works inside one company.
+ *
+ * The UI hides what a role cannot do, but that is convenience, not security -
+ * every one of these boundaries is enforced again in the backend.
+ */
+export type Role = "user" | "admin" | "platform_admin";
+
+/** The roles a company admin is allowed to hand out. Never widen this. */
+export type TenantAssignableRole = "user" | "admin";
+
+export const ROLE_LABELS: Record<Role, string> = {
+  platform_admin: "Platform admin",
+  admin: "Company admin",
+  user: "Member",
+};
 
 export type Department =
   | "hr"
@@ -40,6 +56,73 @@ export interface Me {
   tenant_id: string;
   role: Role;
   email: string | null;
+  tenant_name?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// authentication
+// ---------------------------------------------------------------------------
+
+/** Cognito's name for "you were invited and must choose a real password". */
+export const NEW_PASSWORD_REQUIRED = "NEW_PASSWORD_REQUIRED";
+
+export interface SessionResponse {
+  token: string | null;
+  expires_in: number | null;
+  refresh_token: string | null;
+  challenge: string | null;
+  challenge_session: string | null;
+  user: Me | null;
+}
+
+export interface Acknowledged {
+  status: string;
+  message: string;
+}
+
+// ---------------------------------------------------------------------------
+// tenants and users
+// ---------------------------------------------------------------------------
+export interface TenantOut {
+  id: string;
+  name: string;
+  slug: string;
+  is_active: boolean;
+  contact_email: string | null;
+  created_by: string | null;
+  created_at: string;
+  user_count: number;
+  active_user_count: number;
+  admin_count: number;
+}
+
+export interface TenantList {
+  items: TenantOut[];
+  total: number;
+}
+
+export interface UserOut {
+  id: string;
+  email: string;
+  display_name: string | null;
+  role: Role;
+  department: Department | null;
+  is_active: boolean;
+  tenant_id: string;
+  invited_by: string | null;
+  last_login_at: string | null;
+  created_at: string;
+}
+
+export interface UserList {
+  items: UserOut[];
+  total: number;
+}
+
+export interface InviteResult {
+  user: UserOut;
+  invitation_sent: boolean;
+  message: string;
 }
 
 export interface DocumentOut {

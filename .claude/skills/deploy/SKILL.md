@@ -56,7 +56,7 @@ Nothing deploys that has not passed locally first.
 ```bash
 ruff check app tests seeds && ruff format --check app tests seeds
 ENVIRONMENT=dev AI_PROVIDER=local DEV_AUTH_ENABLED=true \
-  pytest tests/unit tests/integration tests/security tests/evaluation -q   # 190 on 2026-09-11
+  pytest tests/unit tests/integration tests/security tests/evaluation -q   # 279 on 2026-09-12
 (cd ../frontend && npm run typecheck)
 ```
 

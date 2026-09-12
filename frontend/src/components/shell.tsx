@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   Loader2,
   LogOut,
+  Mail,
   Menu,
   MessageSquareText,
   MessagesSquare,
@@ -27,8 +28,8 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import * as React from "react";
 
-import { api, ApiClientError, clearToken, getToken, setToken } from "@/lib/api";
-import type { Me } from "@/types/api";
+import { api, ApiClientError, clearToken, getToken, saveSession, setToken } from "@/lib/api";
+import { NEW_PASSWORD_REQUIRED, ROLE_LABELS, type Me, type SessionResponse } from "@/types/api";
 
 import { Badge, Button, Card, Input, Label, cn } from "./ui";
 
@@ -50,13 +51,44 @@ const USER_NAV: NavItem[] = [
 
 const ADMIN_NAV: NavItem[] = [
   { href: "/admin/users", label: "Users", icon: Users },
-  { href: "/admin/tenants", label: "Tenants", icon: Building2 },
+  { href: "/admin/tenants", label: "My Company", icon: Building2 },
   { href: "/admin/documents", label: "Documents", icon: FileText },
   { href: "/admin/metrics", label: "AI Metrics", icon: Gauge },
   { href: "/admin/security", label: "Security", icon: ShieldCheck },
   { href: "/admin/audit", label: "Audit Logs", icon: ClipboardList },
   { href: "/admin/deployments", label: "Deployments", icon: Rocket },
 ];
+
+/**
+ * The service provider's own navigation.
+ *
+ * A platform operator sees the control plane and nothing else: no chat, no
+ * documents, no departments. That is not decoration - the platform tenant holds
+ * no documents, and onboarding a company deliberately grants no access to its
+ * content. See .claude/rules/tenant-isolation.md section 2.
+ */
+const PLATFORM_NAV: NavItem[] = [
+  { href: "/platform/tenants", label: "Companies", icon: Building2 },
+  { href: "/platform/audit", label: "Onboarding Trail", icon: ClipboardList },
+];
+
+const PLATFORM_OPS_NAV: NavItem[] = [
+  { href: "/admin/security", label: "Security", icon: ShieldCheck },
+  { href: "/admin/deployments", label: "Deployments", icon: Rocket },
+];
+
+const ALL_NAV = [...USER_NAV, ...ADMIN_NAV, ...PLATFORM_NAV, ...PLATFORM_OPS_NAV];
+
+/**
+ * The paste-a-token path, kept for local debugging only.
+ *
+ * It renders solely when the API is localhost, so the deployed sign-in page has
+ * no token field at all. It is a developer convenience, never a way in: the
+ * backend refuses dev-signed tokens outside a dev environment regardless.
+ */
+const DEV_SIGN_IN = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").includes(
+  "localhost",
+);
 
 // ---------------------------------------------------------------------------
 // session
@@ -65,8 +97,17 @@ interface SessionValue {
   me: Me | null;
   loading: boolean;
   error: string | null;
+  /** Exchange credentials for a session. Returns a challenge when one is due. */
+  signInWithPassword: (email: string, password: string) => Promise<SessionResponse>;
+  /** Complete a first sign-in on an invited account. */
+  completeNewPassword: (
+    email: string,
+    challengeSession: string,
+    newPassword: string,
+  ) => Promise<void>;
+  /** Adopt a token directly. Local debugging only - see DEV_SIGN_IN. */
   signIn: (token: string) => Promise<void>;
-  signOut: () => void;
+  signOut: () => Promise<void>;
 }
 
 const SessionContext = React.createContext<SessionValue | null>(null);
@@ -103,6 +144,42 @@ function SessionProvider({ children }: { children: React.ReactNode }) {
     void load();
   }, [load]);
 
+  const adopt = React.useCallback(
+    async (session: SessionResponse) => {
+      if (!session.token) return;
+      saveSession({
+        token: session.token,
+        refresh_token: session.refresh_token,
+        expires_in: session.expires_in,
+      });
+      setLoading(true);
+      await load();
+    },
+    [load],
+  );
+
+  const signInWithPassword = React.useCallback(
+    async (email: string, password: string) => {
+      const session = await api.auth.login(email, password);
+      if (session.token) await adopt(session);
+      return session;
+    },
+    [adopt],
+  );
+
+  const completeNewPassword = React.useCallback(
+    async (email: string, challengeSession: string, newPassword: string) => {
+      await adopt(
+        await api.auth.newPassword({
+          email,
+          challenge_session: challengeSession,
+          new_password: newPassword,
+        }),
+      );
+    },
+    [adopt],
+  );
+
   const signIn = React.useCallback(
     async (token: string) => {
       setToken(token);
@@ -112,13 +189,23 @@ function SessionProvider({ children }: { children: React.ReactNode }) {
     [load],
   );
 
-  const signOut = React.useCallback(() => {
+  const signOut = React.useCallback(async () => {
+    // Ask the directory to revoke every token for this identity first. If that
+    // call fails the local session is still cleared - a sign-out must never
+    // leave the user signed in.
+    try {
+      await api.auth.logout();
+    } catch {
+      /* already signed out, offline, or the token had expired */
+    }
     clearToken();
     setMe(null);
   }, []);
 
   return (
-    <SessionContext.Provider value={{ me, loading, error, signIn, signOut }}>
+    <SessionContext.Provider
+      value={{ me, loading, error, signInWithPassword, completeNewPassword, signIn, signOut }}
+    >
       {children}
     </SessionContext.Provider>
   );
@@ -162,25 +249,122 @@ const SIGN_IN_POINTS: { icon: LucideIcon; title: string; body: string }[] = [
   },
 ];
 
+type Stage = "credentials" | "new-password" | "forgot" | "reset";
+
+const MIN_PASSWORD_LENGTH = 12;
+
+/** Mirrors the Cognito pool policy, so the form fails before the network does. */
+function passwordComplaint(password: string, confirmation: string): string | null {
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return `Use at least ${MIN_PASSWORD_LENGTH} characters.`;
+  }
+  if (!/[a-z]/.test(password)) return "Include a lower-case letter.";
+  if (!/[A-Z]/.test(password)) return "Include an upper-case letter.";
+  if (!/[0-9]/.test(password)) return "Include a number.";
+  if (!/[^A-Za-z0-9]/.test(password)) return "Include a symbol.";
+  if (password !== confirmation) return "The two passwords do not match.";
+  return null;
+}
+
 function SignIn() {
-  const { signIn } = useSession();
-  const [token, setTokenValue] = React.useState("");
+  const { signIn, signInWithPassword, completeNewPassword } = useSession();
+
+  const [stage, setStage] = React.useState<Stage>("credentials");
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [newPassword, setNewPassword] = React.useState("");
+  const [confirmation, setConfirmation] = React.useState("");
+  const [code, setCode] = React.useState("");
+  const [challengeSession, setChallengeSession] = React.useState("");
+  const [notice, setNotice] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
 
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
+  const [token, setTokenValue] = React.useState("");
+
+  function fail(err: unknown) {
+    setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
+  }
+
+  async function attempt(work: () => Promise<void>) {
     setBusy(true);
     setError(null);
     try {
-      await signIn(token.trim());
-      if (!getToken()) setError("That token was rejected.");
+      await work();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Sign-in failed.");
+      fail(err);
     } finally {
       setBusy(false);
     }
   }
+
+  const submitCredentials = (event: React.FormEvent) => {
+    event.preventDefault();
+    void attempt(async () => {
+      const session = await signInWithPassword(email.trim(), password);
+      if (session.challenge === NEW_PASSWORD_REQUIRED && session.challenge_session) {
+        // An invited account signing in for the first time. Not an error.
+        setChallengeSession(session.challenge_session);
+        setPassword("");
+        setNotice("Welcome. Choose a password to finish setting up your account.");
+        setStage("new-password");
+      } else if (!session.token) {
+        setNotice(null);
+        setError("This account needs to be reset before it can sign in.");
+      }
+    });
+  };
+
+  const submitNewPassword = (event: React.FormEvent) => {
+    event.preventDefault();
+    const complaint = passwordComplaint(newPassword, confirmation);
+    if (complaint) {
+      setError(complaint);
+      return;
+    }
+    void attempt(async () => {
+      await completeNewPassword(email.trim(), challengeSession, newPassword);
+    });
+  };
+
+  const submitForgot = (event: React.FormEvent) => {
+    event.preventDefault();
+    void attempt(async () => {
+      const result = await api.auth.forgotPassword(email.trim());
+      setNotice(result.message);
+      setStage("reset");
+    });
+  };
+
+  const submitReset = (event: React.FormEvent) => {
+    event.preventDefault();
+    const complaint = passwordComplaint(newPassword, confirmation);
+    if (complaint) {
+      setError(complaint);
+      return;
+    }
+    void attempt(async () => {
+      await api.auth.confirmPasswordReset({
+        email: email.trim(),
+        code: code.trim(),
+        new_password: newPassword,
+      });
+      setNotice("Your password has been changed. Sign in with it.");
+      setPassword("");
+      setNewPassword("");
+      setConfirmation("");
+      setCode("");
+      setStage("credentials");
+    });
+  };
+
+  const submitToken = (event: React.FormEvent) => {
+    event.preventDefault();
+    void attempt(async () => {
+      await signIn(token.trim());
+      if (!getToken()) setError("That token was rejected.");
+    });
+  };
 
   return (
     <main className="grid min-h-dvh lg:grid-cols-2">
@@ -229,51 +413,265 @@ function SignIn() {
       <section className="flex items-center justify-center p-6">
         <Card className="w-full max-w-md animate-fade-in p-7 shadow-lift">
           <BrandMark className="mb-5" />
-          <h1 className="text-xl font-semibold tracking-tight">Enterprise Knowledge AI</h1>
+          <h1 className="text-xl font-semibold tracking-tight">
+            {stage === "credentials" ? "Sign in" : null}
+            {stage === "new-password" ? "Set your password" : null}
+            {stage === "forgot" ? "Reset your password" : null}
+            {stage === "reset" ? "Enter your reset code" : null}
+          </h1>
           <p className="mt-1 text-sm text-muted">
-            Sign in with your Cognito access token to continue.
+            {stage === "credentials"
+              ? "Use the work email address your administrator invited."
+              : null}
+            {stage === "new-password"
+              ? "Your invitation password is temporary. This one is yours."
+              : null}
+            {stage === "forgot" ? "We will email you a code to set a new password." : null}
+            {stage === "reset" ? "Check your email for the code we just sent." : null}
           </p>
 
-          <form onSubmit={submit} className="mt-6 space-y-4">
-            <div>
-              <Label htmlFor="token">Access token</Label>
-              <div className="relative">
-                <KeyRound
-                  aria-hidden
-                  className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted"
+          {notice ? (
+            <p className="mt-4 rounded-lg bg-accent/10 px-3 py-2 text-xs leading-relaxed text-accent">
+              {notice}
+            </p>
+          ) : null}
+
+          {/* ---- stage: credentials ---------------------------------------- */}
+          {stage === "credentials" ? (
+            <form onSubmit={submitCredentials} className="mt-6 space-y-4">
+              <div>
+                <Label htmlFor="email">Work email</Label>
+                <div className="relative">
+                  <Mail
+                    aria-hidden
+                    className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted"
+                  />
+                  <Input
+                    id="email"
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@company.com"
+                    autoComplete="username"
+                    className="pl-9"
+                    required
+                  />
+                </div>
+              </div>
+              <div>
+                <Label htmlFor="password">Password</Label>
+                <div className="relative">
+                  <KeyRound
+                    aria-hidden
+                    className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted"
+                  />
+                  <Input
+                    id="password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    autoComplete="current-password"
+                    className="pl-9"
+                    required
+                  />
+                </div>
+              </div>
+              {error ? <FormError message={error} /> : null}
+              <Button
+                type="submit"
+                size="lg"
+                disabled={busy || !email.trim() || !password}
+                className="w-full"
+              >
+                {busy ? <Loader2 aria-hidden className="h-4 w-4 animate-spin" /> : null}
+                {busy ? "Signing in…" : "Sign in"}
+              </Button>
+              <button
+                type="button"
+                onClick={() => {
+                  setStage("forgot");
+                  setError(null);
+                  setNotice(null);
+                }}
+                className="w-full text-center text-xs text-muted underline-offset-2 hover:text-fg hover:underline"
+              >
+                Forgot your password?
+              </button>
+            </form>
+          ) : null}
+
+          {/* ---- stage: first sign-in -------------------------------------- */}
+          {stage === "new-password" ? (
+            <form onSubmit={submitNewPassword} className="mt-6 space-y-4">
+              <PasswordFields
+                newPassword={newPassword}
+                confirmation={confirmation}
+                onNewPassword={setNewPassword}
+                onConfirmation={setConfirmation}
+              />
+              {error ? <FormError message={error} /> : null}
+              <Button type="submit" size="lg" disabled={busy} className="w-full">
+                {busy ? <Loader2 aria-hidden className="h-4 w-4 animate-spin" /> : null}
+                {busy ? "Saving…" : "Set password and continue"}
+              </Button>
+            </form>
+          ) : null}
+
+          {/* ---- stage: forgot password ------------------------------------ */}
+          {stage === "forgot" ? (
+            <form onSubmit={submitForgot} className="mt-6 space-y-4">
+              <div>
+                <Label htmlFor="forgot-email">Work email</Label>
+                <Input
+                  id="forgot-email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@company.com"
+                  autoComplete="username"
+                  required
                 />
+              </div>
+              {error ? <FormError message={error} /> : null}
+              <Button type="submit" size="lg" disabled={busy || !email.trim()} className="w-full">
+                {busy ? <Loader2 aria-hidden className="h-4 w-4 animate-spin" /> : null}
+                Send reset code
+              </Button>
+              <BackToSignIn onClick={() => setStage("credentials")} />
+            </form>
+          ) : null}
+
+          {/* ---- stage: confirm reset -------------------------------------- */}
+          {stage === "reset" ? (
+            <form onSubmit={submitReset} className="mt-6 space-y-4">
+              <div>
+                <Label htmlFor="code">Reset code</Label>
+                <Input
+                  id="code"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  required
+                />
+              </div>
+              <PasswordFields
+                newPassword={newPassword}
+                confirmation={confirmation}
+                onNewPassword={setNewPassword}
+                onConfirmation={setConfirmation}
+              />
+              {error ? <FormError message={error} /> : null}
+              <Button type="submit" size="lg" disabled={busy || !code.trim()} className="w-full">
+                {busy ? <Loader2 aria-hidden className="h-4 w-4 animate-spin" /> : null}
+                Change password
+              </Button>
+              <BackToSignIn onClick={() => setStage("credentials")} />
+            </form>
+          ) : null}
+
+          <p className="mt-6 flex items-start gap-2 border-t border-border pt-4 text-xs leading-relaxed text-muted">
+            <ShieldCheck aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              Your company and permissions come from your verified sign-in, never from this
+              browser. Accounts are created by invitation only.
+            </span>
+          </p>
+
+          {/* Local debugging only: absent entirely from a deployed build. */}
+          {DEV_SIGN_IN ? (
+            <details className="mt-4 rounded-lg border border-border/70 px-3 py-2">
+              <summary className="cursor-pointer text-xs font-medium text-muted">
+                Developer sign-in
+              </summary>
+              <form onSubmit={submitToken} className="mt-3 space-y-2">
+                <Label htmlFor="token">Access token</Label>
                 <Input
                   id="token"
                   value={token}
                   onChange={(e) => setTokenValue(e.target.value)}
                   placeholder="eyJhbGciOi..."
                   autoComplete="off"
-                  className="pl-9"
-                  required
                 />
-              </div>
-            </div>
-            {error ? (
-              <p role="alert" className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
-                {error}
-              </p>
-            ) : null}
-            <Button type="submit" size="lg" disabled={busy || !token.trim()} className="w-full">
-              {busy ? <Loader2 aria-hidden className="h-4 w-4 animate-spin" /> : null}
-              {busy ? "Signing in…" : "Sign in"}
-            </Button>
-          </form>
-
-          <p className="mt-6 border-t border-border pt-4 text-xs leading-relaxed text-muted">
-            In local development, mint a token with{" "}
-            <code className="rounded bg-border/60 px-1 py-0.5 font-mono text-[11px] text-fg">
-              python -m seeds.dev_token
-            </code>
-            . On AWS this comes from the Cognito hosted UI.
-          </p>
+                <Button type="submit" variant="secondary" size="sm" disabled={busy || !token.trim()}>
+                  Use token
+                </Button>
+                <p className="text-[11px] leading-relaxed text-muted">
+                  Mint one with{" "}
+                  <code className="rounded bg-border/60 px-1 py-0.5 font-mono text-[10px] text-fg">
+                    python -m seeds.dev_token
+                  </code>
+                  . Rejected outside a dev environment.
+                </p>
+              </form>
+            </details>
+          ) : null}
         </Card>
       </section>
     </main>
+  );
+}
+
+function FormError({ message }: { message: string }) {
+  return (
+    <p role="alert" className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
+      {message}
+    </p>
+  );
+}
+
+function BackToSignIn({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full text-center text-xs text-muted underline-offset-2 hover:text-fg hover:underline"
+    >
+      Back to sign in
+    </button>
+  );
+}
+
+function PasswordFields({
+  newPassword,
+  confirmation,
+  onNewPassword,
+  onConfirmation,
+}: {
+  newPassword: string;
+  confirmation: string;
+  onNewPassword: (value: string) => void;
+  onConfirmation: (value: string) => void;
+}) {
+  const complaint = newPassword ? passwordComplaint(newPassword, newPassword) : null;
+  return (
+    <>
+      <div>
+        <Label htmlFor="new-password">New password</Label>
+        <Input
+          id="new-password"
+          type="password"
+          value={newPassword}
+          onChange={(e) => onNewPassword(e.target.value)}
+          autoComplete="new-password"
+          required
+        />
+        <p className="mt-1 text-[11px] text-muted">
+          {complaint ?? `At least ${MIN_PASSWORD_LENGTH} characters, mixed case, a number and a symbol.`}
+        </p>
+      </div>
+      <div>
+        <Label htmlFor="confirm-password">Confirm password</Label>
+        <Input
+          id="confirm-password"
+          type="password"
+          value={confirmation}
+          onChange={(e) => onConfirmation(e.target.value)}
+          autoComplete="new-password"
+          required
+        />
+      </div>
+    </>
   );
 }
 
@@ -313,6 +711,19 @@ function NavLink({ href, label, icon: Icon }: NavItem) {
   );
 }
 
+function NavSection({ label, items }: { label: string; items: NavItem[] }) {
+  return (
+    <>
+      <p className="px-3 pb-1.5 pt-1 text-[11px] font-semibold uppercase tracking-wider text-muted/80 first:pt-1 [&:not(:first-child)]:pt-5">
+        {label}
+      </p>
+      {items.map((item) => (
+        <NavLink key={item.href} {...item} />
+      ))}
+    </>
+  );
+}
+
 function initials(me: Me | null): string {
   const source = me?.email ?? me?.user_id ?? "?";
   const name = source.split("@")[0] ?? source;
@@ -325,6 +736,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = React.useState(false);
+  const [signingOut, setSigningOut] = React.useState(false);
 
   // Close the mobile menu whenever the route changes.
   React.useEffect(() => {
@@ -363,24 +775,25 @@ function Chrome({ children }: { children: React.ReactNode }) {
           id="primary-navigation"
           className={cn("flex-1 flex-col overflow-y-auto lg:flex", menuOpen ? "flex" : "hidden")}
         >
+          {/*
+            Role-aware navigation. This hides what a role cannot use; it is not
+            the security boundary. Every route behind these links is
+            authorized again server-side.
+          */}
           <nav aria-label="Primary" className="space-y-0.5 px-3 pb-4">
-            <p className="px-3 pb-1.5 pt-1 text-[11px] font-semibold uppercase tracking-wider text-muted/80">
-              Workspace
-            </p>
-            {USER_NAV.map((item) => (
-              <NavLink key={item.href} {...item} />
-            ))}
-
-            {me?.role === "admin" ? (
+            {me?.role === "platform_admin" ? (
               <>
-                <p className="px-3 pb-1.5 pt-5 text-[11px] font-semibold uppercase tracking-wider text-muted/80">
-                  Admin
-                </p>
-                {ADMIN_NAV.map((item) => (
-                  <NavLink key={item.href} {...item} />
-                ))}
+                <NavSection label="Platform" items={PLATFORM_NAV} />
+                <NavSection label="Operations" items={PLATFORM_OPS_NAV} />
               </>
-            ) : null}
+            ) : (
+              <>
+                <NavSection label="Workspace" items={USER_NAV} />
+                {me?.role === "admin" ? (
+                  <NavSection label="Company admin" items={ADMIN_NAV} />
+                ) : null}
+              </>
+            )}
           </nav>
 
           {/* user card */}
@@ -394,23 +807,43 @@ function Chrome({ children }: { children: React.ReactNode }) {
               </span>
               <div className="min-w-0 flex-1 text-xs">
                 <p className="truncate font-medium text-fg">{me?.email ?? me?.user_id}</p>
-                <p className="truncate text-muted">
-                  tenant <span className="font-mono">{me?.tenant_id}</span>
+                <p className="truncate text-muted" title={me?.tenant_id}>
+                  {me?.tenant_name ?? me?.tenant_id}
                 </p>
               </div>
-              <Badge tone={me?.role === "admin" ? "accent" : "neutral"}>{me?.role}</Badge>
+              <Badge
+                tone={
+                  me?.role === "platform_admin"
+                    ? "violet"
+                    : me?.role === "admin"
+                      ? "accent"
+                      : "neutral"
+                }
+              >
+                {me ? ROLE_LABELS[me.role] : ""}
+              </Badge>
             </div>
             <Button
               variant="secondary"
               size="sm"
               className="mt-3 w-full"
+              disabled={signingOut}
               onClick={() => {
-                signOut();
-                router.push("/");
+                setSigningOut(true);
+                // Revoke server-side first, then leave. Awaiting it means a
+                // user who clicks and closes the tab is still signed out.
+                void signOut().finally(() => {
+                  setSigningOut(false);
+                  router.push("/");
+                });
               }}
             >
-              <LogOut aria-hidden className="h-3.5 w-3.5" />
-              Sign out
+              {signingOut ? (
+                <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <LogOut aria-hidden className="h-3.5 w-3.5" />
+              )}
+              {signingOut ? "Signing out…" : "Sign out"}
             </Button>
           </div>
         </div>
@@ -460,7 +893,7 @@ export function PageHeader({
   action?: React.ReactNode;
 }) {
   const pathname = usePathname();
-  const Icon = [...ADMIN_NAV, ...USER_NAV].find((item) => isActive(pathname, item.href))?.icon;
+  const Icon = ALL_NAV.find((item) => isActive(pathname, item.href))?.icon;
 
   return (
     <header className="mb-6 flex flex-wrap items-start justify-between gap-4">

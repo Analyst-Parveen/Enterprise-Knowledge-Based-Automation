@@ -83,10 +83,28 @@ class TestRBAC:
 
         require_admin(admin_a)  # must not raise
 
-    def test_roles_are_exactly_user_and_admin(self) -> None:
+    def test_the_role_set_is_closed(self) -> None:
+        """Three roles, and the token layer and the database layer agree on them.
+
+        A role that exists in one layer but not the other is how an
+        unauthorized principal gets in, so both sets are pinned here together.
+        """
+        from typing import get_args
+
+        from app.core.auth import KNOWN_ROLES
+        from app.core.context import Role
         from app.db.models import UserRole
 
-        assert {r.value for r in UserRole} == {"user", "admin"}
+        expected = {"user", "admin", "platform_admin"}
+        assert {r.value for r in UserRole} == expected
+        assert set(get_args(Role)) == expected
+        assert set(KNOWN_ROLES) == expected
+
+    def test_the_platform_role_is_not_tenant_assignable(self) -> None:
+        """No tenant admin may ever hand out platform privileges."""
+        from app.core.context import TENANT_ASSIGNABLE_ROLES
+
+        assert set(TENANT_ASSIGNABLE_ROLES) == {"user", "admin"}
 
 
 class TestDevAuthGating:

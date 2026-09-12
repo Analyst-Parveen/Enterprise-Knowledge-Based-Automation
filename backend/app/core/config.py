@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     # NEVER enable outside dev - a test asserts this.
     dev_auth_enabled: bool = False
     dev_auth_secret: SecretStr = SecretStr("dev-only-not-a-real-secret")
+    # The password every seeded account accepts when dev auth is on, so the
+    # real sign-in screen can be exercised locally with no Cognito pool.
+    dev_auth_password: SecretStr = SecretStr("LocalDev!2026")
+    dev_auth_token_ttl_seconds: int = 3600
 
     # -- AI: Amazon Bedrock ----------------------------------------------
     ai_provider: AIProvider = "bedrock"
@@ -97,6 +101,8 @@ class Settings(BaseSettings):
     rate_limit_requests_per_min: int = 20
     rate_limit_server_requests_per_min: int = 10
     rate_limit_uploads_per_min: int = 5
+    # Sign-in and password-reset attempts, per client IP per minute.
+    rate_limit_auth_attempts_per_min: int = 10
 
     # -- security --------------------------------------------------------
     cors_allowed_origins: str = "http://localhost:3000"
