@@ -90,7 +90,16 @@ ACTUAL_NAME="$(aws cognito-idp describe-user-pool --user-pool-id "$POOL_ID" \
 
 POOL_ARN="$(aws cognito-idp describe-user-pool --user-pool-id "$POOL_ID" \
               --query 'UserPool.Arn' --output text | tr -d '\r')"
-assert_project_owned "$POOL_ARN"
+# Cognito user-pool ARNs carry the opaque pool id (us-west-2_…), not the
+# friendly name, so assert_project_owned's ARN name-prefix test cannot apply.
+# Ownership here is: name == ekba-<env>-users (checked above) AND the
+# ProjectCode tag. That is the same three-signal rule, expressed for Cognito.
+POOL_TAG="$(aws resourcegroupstaggingapi get-resources \
+              --resource-arn-list "$POOL_ARN" \
+              --query "ResourceTagMappingList[0].Tags[?Key=='ProjectCode'].Value | [0]" \
+              --output text 2>/dev/null | tr -d '\r' || echo None)"
+[ "$POOL_TAG" = "$PROJECT_CODE" ] \
+  || die "pool ${POOL_ID} is missing ProjectCode=${PROJECT_CODE} - refusing to touch it."
 ok "user pool ${POOL_NAME} (${POOL_ID}) is owned by this project"
 
 # ---------------------------------------------------------------------------
