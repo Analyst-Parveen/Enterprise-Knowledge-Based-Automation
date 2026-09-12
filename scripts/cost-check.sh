@@ -87,13 +87,32 @@ if [ "${NATS:-0}" != "0" ] && [ "${NATS}" != "None" ]; then
   RUNNING=1
 fi
 
-# RDS - should ALWAYS be zero in this project
-DBS="$(aws rds describe-db-instances \
-        --query "length(DBInstances[?starts_with(DBInstanceIdentifier, '${PROJECT_CODE}')])" \
+# RDS - exactly one small instance, part of the ephemeral dev stack
+DB_STATUS="$(db_instance_status)"
+case "$DB_STATUS" in
+  "") ;;
+  stopped)
+    warn "RDS ${DB_INSTANCE_ID}: stopped  (storage still ~\$0.003/hr; AWS restarts a stopped instance after 7 days)"
+    RUNNING=1 ;;
+  *)
+    warn "RDS ${DB_INSTANCE_ID}: ${DB_STATUS}  (~\$0.019/hr: db.t4g.micro + 20 GB gp3)"
+    RUNNING=1 ;;
+esac
+
+# Any OTHER project database would be a mistake - only one is ever provisioned.
+OTHER_DBS="$(aws rds describe-db-instances \
+        --query "length(DBInstances[?starts_with(DBInstanceIdentifier, '${PROJECT_CODE}') && DBInstanceIdentifier != '${DB_INSTANCE_ID}'])" \
         --output text 2>/dev/null || echo 0)"
-if [ "${DBS:-0}" != "0" ] && [ "${DBS}" != "None" ]; then
-  err "RDS instances found: ${DBS}. This project uses a Postgres CONTAINER, not RDS."
+if [ "${OTHER_DBS:-0}" != "0" ] && [ "${OTHER_DBS}" != "None" ]; then
+  err "unexpected RDS instances: ${OTHER_DBS}. Only ${DB_INSTANCE_ID} belongs to this project."
   RUNNING=1
+fi
+
+# Snapshots kept between sessions (not billable compute, a few cents of storage)
+SNAPS="$(aws rds describe-db-snapshots --db-instance-identifier "$DB_INSTANCE_ID" --snapshot-type manual \
+          --query 'length(DBSnapshots)' --output text 2>/dev/null | tr -d '\r' || echo 0)"
+if [ "${SNAPS:-0}" != "0" ] && [ "${SNAPS}" != "None" ]; then
+  log "RDS snapshots kept: ${SNAPS} (newest is restored on the next deploy; ~\$0.095/GB-month of data)"
 fi
 
 if [ "$RUNNING" = "0" ]; then

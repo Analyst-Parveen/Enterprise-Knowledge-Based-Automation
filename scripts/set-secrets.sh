@@ -46,13 +46,15 @@ set_if_empty() {
   ok "${id}: value set"
 }
 
-# The database secret is JSON with two keys, both built from ONE password:
-#   postgres container reads  <arn>:password::
-#   api container reads       <arn>:url::
-# so the two can never drift apart. Hex keeps the password URL-safe.
+# The database secret is JSON. Only its "password" key is used, in two places,
+# so they can never drift apart:
+#   RDS master password   Terraform reads it ephemerally (write-only, never in state)
+#   api container         <arn>:password:: injected as DB_PASSWORD; the container
+#                         builds DATABASE_URL from it plus the RDS endpoint
+# Hex keeps the password URL-safe. Secrets created before the move to RDS also
+# carry a "url" key for the old Postgres sidecar; nothing reads it any more.
 PGPASS="$(rand_hex 24)"
-set_if_empty "backend/database-url" \
-  "{\"password\":\"${PGPASS}\",\"url\":\"postgresql+asyncpg://ekba:${PGPASS}@localhost:5432/ekba\"}"
+set_if_empty "backend/database-url" "{\"password\":\"${PGPASS}\"}"
 unset PGPASS
 
 set_if_empty "backend/qdrant-api-key"   "$(rand_hex 32)"

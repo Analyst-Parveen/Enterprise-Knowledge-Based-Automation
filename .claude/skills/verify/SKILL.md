@@ -61,7 +61,10 @@ prefix + `ProjectCode=ekba` tag). Report anything ambiguous; touch nothing.
 
 ## Step 3 — Services
 
-- PostgreSQL reachable from the application security group; migrations at head.
+- PostgreSQL (Amazon RDS `ekba-<env>-postgres`) reachable from the task security
+  group; migrations at head. `verify.sh` checks this three ways: `/health/ready`
+  (a real `SELECT 1`), the instance being `available`, not publicly accessible and
+  encrypted, and the DB security group admitting only the task security group.
 - Qdrant reachable; collections exist with the expected vector dimension.
 - Redis reachable; used for cache and rate limiting.
 - Containers running as non-root, healthy, and at the expected image SHA.

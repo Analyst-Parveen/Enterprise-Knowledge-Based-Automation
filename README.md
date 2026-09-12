@@ -6,16 +6,21 @@ cost-conscious ephemeral AWS deployment.
 
 > **Status (2026-09-11):** the local platform runs end to end; the last deploy
 > gate passed 190 backend tests and the frontend typecheck. The AWS demo stack
-> deploys through CodeDeploy blue-green and passes verification. Open items:
+> deploys through CodeDeploy blue-green and passes verification; PostgreSQL on
+> AWS is a private **Amazon RDS** instance (the Postgres sidecar is gone), and
+> the frontend is live on Amplify behind a CloudFront API front door. Open items:
 > Bedrock quotas are 0 in the AWS account (no chat or demo data on AWS yet),
 > `rollback.sh` does not shift traffic yet, and the cost guard is still in
-> dry-run. See [RUNBOOK.md](RUNBOOK.md) to run it.
+> dry-run. See [RUNBOOK.md](RUNBOOK.md) to run it, or the Hinglish
+> [handbook](docs/handbook/ENTERPRISE_KNOWLEDGE_AUTOMATION_COMPLETE_HANDBOOK.md)
+> ([PDF](docs/handbook/ENTERPRISE_KNOWLEDGE_AUTOMATION_COMPLETE_HANDBOOK.pdf)).
 
 ## Documentation
 
 | Document | Purpose |
 |---|---|
 | **[RUNBOOK.md](RUNBOOK.md)** | **How to run it — start here.** Local setup, AWS deploy, blue-green explained, troubleshooting |
+| [docs/handbook/](docs/handbook/) | Complete hands-on training manual in simple Hinglish (Markdown + PDF) |
 | [infra/terraform/README.md](infra/terraform/README.md) | The four Terraform states, the cost guard and the frontend hosting |
 | [PROJECT.md](PROJECT.md) | Full requirements and architecture — the source of truth |
 | [docs/reports/](docs/reports/) | Timestamped reports from every lifecycle run |
@@ -28,7 +33,7 @@ cost-conscious ephemeral AWS deployment.
 **Frontend** Next.js · TypeScript · Tailwind · shadcn/ui
 **Backend** FastAPI · Pydantic · SQLAlchemy · Alembic
 **AI** Amazon Bedrock · LangGraph · Amazon Transcribe
-**Data** Qdrant · PostgreSQL · Redis · Amazon S3
+**Data** Qdrant · PostgreSQL (Amazon RDS on AWS) · Redis · Amazon S3
 **Auth** Amazon Cognito
 **Infra** Terraform · Docker · ECR · CodeDeploy · GitHub Actions
 **Observability** CloudWatch · LangSmith
@@ -61,12 +66,12 @@ deploy -> test -> verify -> live demo -> destroy -> audit -> deploy again
 | Script | Purpose |
 |---|---|
 | `scripts/deploy.sh` | Cost guard, local gate, image, Terraform, CodeDeploy blue-green, `verify.sh` |
-| `scripts/verify.sh` | Health of the deployed API (read-only; most other checks are still placeholders) |
+| `scripts/verify.sh` | Health + readiness (PostgreSQL/RDS, Redis, Qdrant) of the deployed API, RDS posture (read-only; other checks are placeholders) |
 | `scripts/cost-check.sh` | Gross / credits / net spend, what is running, whether the kill switch is armed |
 | `scripts/test-e2e.sh` | Full end-to-end tests — local stack |
 | `scripts/seed.sh` | Seed demo data — local stack (on AWS the task seeds itself at startup) |
 | `scripts/rollback.sh` | Placeholder — does not shift traffic yet; re-runs `verify.sh` (never destroys) |
-| `scripts/destroy.sh` | Destroy only this project's ephemeral infrastructure |
+| `scripts/destroy.sh` | Snapshot the RDS database, then destroy only this project's ephemeral infrastructure |
 | `scripts/deploy-frontend.sh` | Frontend on AWS Amplify: CloudFront API front door, backend wiring, build, verification |
 | `scripts/rollback-frontend.sh` | Rebuild an earlier frontend commit on Amplify (app-level only) |
 
@@ -74,15 +79,17 @@ deploy -> test -> verify -> live demo -> destroy -> audit -> deploy again
 
 One region (`us-west-2`), four Terraform states — protected baseline, protected
 cost guard, ephemeral `dev` stack, persistent frontend. The `dev` stack is an ALB in front of one ECS
-Fargate task (API + Postgres + Qdrant + Redis containers), released by **AWS
-CodeDeploy blue-green** through two target groups and a test listener. The
+Fargate task (API + Qdrant + Redis containers) and a private **RDS PostgreSQL**
+(`db.t4g.micro`), released by **AWS CodeDeploy blue-green** through two target
+groups and a test listener. PostgreSQL data survives task replacement and every
+deploy; `destroy.sh` snapshots it and `deploy.sh` restores it. The
 account must be on the AWS **Paid** plan — the Free plan rejects every CodeDeploy
 call with `SubscriptionRequiredException`.
 
 The ALB accepts traffic only from `allowed_cidrs`, a single `/32`. When your
 public IP changes, update it and redeploy, or `verify.sh` fails even though the
 deployment is healthy. Details and troubleshooting in
-**[RUNBOOK.md](RUNBOOK.md#part-b--deploying-to-aws-009hour-while-it-exists)**.
+**[RUNBOOK.md](RUNBOOK.md#part-b--deploying-to-aws-011hour-while-it-exists)**.
 
 ### Frontend on AWS Amplify
 
@@ -97,7 +104,7 @@ repository connection in the Amplify console, everything else is one command:
 ./scripts/deploy-frontend.sh               # deploy / update / verify
 ```
 
-**Status (2026-09-11):** implemented and dry-run tested; not applied yet. See
+**Status (2026-09-11):** live — `https://aws-deployment.<app-id>.amplifyapp.com`, API through CloudFront. See
 **[RUNBOOK.md Part C](RUNBOOK.md#part-c--frontend-on-aws-amplify)**.
 
 ## Safety
@@ -114,13 +121,15 @@ repository connection in the Amplify console, everything else is one command:
 | Environment | Where | Cost |
 |---|---|---|
 | Local — all development | Docker Compose | **$0** |
-| AWS demo — on demand | ECS Fargate, ephemeral | **~$0.09 / hour** (~$0.37 per 4-hour session) |
+| AWS demo — on demand | ECS Fargate + RDS, ephemeral | **~$0.11 / hour** (~$0.44 per 4-hour session) |
 
-The AWS environment is ephemeral by design. **No NAT Gateway, no RDS, no
-ElastiCache, no EKS, no EFS** — Postgres, Qdrant, and Redis run as containers and
-are re-seeded on every deploy. Nothing in the `dev` stack survives `destroy.sh`,
-so a destroyed environment costs $0/hour; the protected baseline costs about
-$1.70/month at rest, mostly Secrets Manager.
+The AWS environment is ephemeral by design. **No NAT Gateway, no ElastiCache, no
+EKS, no EFS**, and exactly one small RDS instance (`db.t4g.micro`, single-AZ, 20 GB,
+private) that exists only while the `dev` stack does — ~$0.019/hour, or ~$14/month
+if it were left running 24/7. Qdrant and Redis run as containers. Nothing billable
+in the `dev` stack survives `destroy.sh`, so a destroyed environment costs $0/hour;
+the database's data is kept as a manual snapshot (a few cents a month), and the
+protected baseline costs about $1.70/month at rest, mostly Secrets Manager.
 
 ```bash
 ./scripts/cost-check.sh   # gross / credits / net spend + what is running billable now
@@ -129,7 +138,8 @@ $1.70/month at rest, mostly Secrets Manager.
 
 Spend is measured **gross of credits** — with credits netted in, AWS reports $0
 until they run out. The **cost guard** (`infra/terraform/envs/cost-guard`) emails
-at $10 and $15 of gross usage, and stops the stack at $18, on any charge credits
+at $10 and $15 of gross usage, and stops the stack (ECS to zero, ALB deleted, RDS
+stopped) at $18, on any charge credits
 did not cover, or after 8 hours. **It is in dry-run** until explicitly armed.
 `deploy.sh` refuses to deploy at the same $18. See
 [infra/terraform/README.md](infra/terraform/README.md#envscost-guard--protected-always-on).

@@ -11,9 +11,10 @@
 # An hourly EventBridge rule invokes the same Lambda to enforce the maximum
 # demo session length.
 #
-# The Lambda scales ECS services to zero and deletes load balancers - nothing
-# else - and only for resources that pass all three ownership signals. IAM
-# enforces the same boundary independently of the code.
+# The Lambda scales ECS services to zero, deletes load balancers and stops the
+# RDS instance (never deletes it - the data stays). Nothing else, and only for
+# resources that pass all three ownership signals. IAM enforces the same
+# boundary independently of the code.
 #
 # Why not native Budget Actions: they can only apply IAM/SCP policies or stop
 # EC2/RDS instances. They cannot stop Fargate or delete a load balancer.
@@ -53,6 +54,8 @@ locals {
     "arn:aws:ecs:${local.region}:${local.account_id}:service/${local.name}/*",
     "arn:aws:ecs:${local.region}:${local.account_id}:service/${local.name}-*/*",
   ]
+
+  db_instance_arn = "arn:aws:rds:${local.region}:${local.account_id}:db:${local.name}-*"
 }
 
 ##############################################################################
@@ -198,9 +201,10 @@ resource "aws_iam_role" "lambda" {
   })
 }
 
-# The ONLY two mutating permissions are ecs:UpdateService and
-# elasticloadbalancing:DeleteLoadBalancer, each restricted by ARN pattern AND by
-# the live ephemeral tags. Even a bug in the code cannot reach the protected
+# The ONLY three mutating permissions are ecs:UpdateService,
+# elasticloadbalancing:DeleteLoadBalancer and rds:StopDBInstance, each
+# restricted by ARN pattern AND by the live ephemeral tags. There is no
+# rds:Delete* at all. Even a bug in the code cannot reach the protected
 # baseline, another environment, or anything outside this project.
 resource "aws_iam_role_policy" "lambda" {
   name = local.guard
@@ -237,6 +241,20 @@ resource "aws_iam_role_policy" "lambda" {
         Condition = { StringEquals = local.ephemeral_tags }
       },
       {
+        Sid      = "DescribeEnvironmentDatabases"
+        Effect   = "Allow"
+        Action   = ["rds:DescribeDBInstances"]
+        Resource = local.db_instance_arn
+      },
+      {
+        # Stop, never delete: a stopped instance keeps its data.
+        Sid       = "StopEphemeralDatabases"
+        Effect    = "Allow"
+        Action    = ["rds:StopDBInstance"]
+        Resource  = local.db_instance_arn
+        Condition = { StringEquals = local.ephemeral_tags }
+      },
+      {
         Sid      = "ReadEnvironmentStateOnly"
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
@@ -260,7 +278,7 @@ resource "aws_iam_role_policy" "lambda" {
 
 resource "aws_lambda_function" "guard" {
   function_name    = local.guard
-  description      = "Stops ${local.name} (ECS to zero, ALB deleted) on budget or session-limit breach."
+  description      = "Stops ${local.name} (ECS to zero, ALB deleted, RDS stopped) on budget or session-limit breach."
   role             = aws_iam_role.lambda.arn
   runtime          = "python3.12"
   handler          = "handler.handler"

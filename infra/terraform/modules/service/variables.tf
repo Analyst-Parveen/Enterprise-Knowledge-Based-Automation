@@ -106,9 +106,19 @@ variable "secret_arns" {
   default     = []
 }
 
-variable "postgres_password_secret_arn" {
-  description = "Secrets Manager ARN holding the Postgres password."
-  type        = string
+variable "database" {
+  description = <<-EOT
+    RDS connection. host/port/name/user are plain configuration; password_secret
+    is a Secrets Manager valueFrom reference (ARN plus ":password::" JSON key), so
+    the password is injected at task start and never enters Terraform state.
+  EOT
+  type = object({
+    host            = string
+    port            = number
+    name            = string
+    user            = string
+    password_secret = string
+  })
 }
 
 variable "s3_bucket" {

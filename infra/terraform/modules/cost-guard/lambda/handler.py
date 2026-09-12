@@ -6,17 +6,21 @@ Invoked by:
   * EventBridge, hourly, to enforce the maximum demo session length.
   * An operator, directly, with {"trigger": "manual"} or {"trigger": "session-limit"}.
 
-It acts on exactly two resource kinds, and only when a resource passes every
+It acts on exactly three resource kinds, and only when a resource passes every
 ownership signal in .claude/rules/terraform.md (name prefix, tags, presence in
 the environment's Terraform state):
 
   * ECS services are scaled to zero tasks (not deleted).
   * Application load balancers are deleted - an ALB cannot be paused, and an
     idle one costs more per month than the whole project ceiling.
+  * RDS instances are STOPPED, never deleted - the data stays. A stopped
+    instance still bills its storage, and AWS starts it again after 7 days;
+    the hourly check then finds it running past the session limit and stops
+    it again.
 
 Everything else - network, IAM, logs, and the entire protected baseline - is
 left for scripts/destroy.sh, so Terraform stays the owner of the environment.
-This function never runs terraform destroy.
+This function never runs terraform destroy and never deletes data.
 """
 
 from __future__ import annotations
@@ -32,11 +36,17 @@ from botocore.exceptions import ClientError
 
 ECS_SERVICE_TYPE = "ecs:service"
 LOAD_BALANCER_TYPE = "elasticloadbalancing:loadbalancer"
+DB_INSTANCE_TYPE = "rds:db"
+
+# RDS states in which the instance bills compute. "stopped"/"stopping" only
+# bill storage, and "deleting" is on its way out.
+DB_NOT_BILLABLE = frozenset({"stopped", "stopping", "deleting"})
 
 LEFT_IN_PLACE = (
     "Left in place (no cost at rest; removed by scripts/destroy.sh): VPC, subnets, "
-    "internet gateway, route table, security groups, target groups, ECS cluster, "
-    "task definitions, IAM roles, log groups, alarms."
+    "internet gateway, route tables, security groups, DB subnet group, target groups, "
+    "ECS cluster, task definitions, IAM roles, log groups, alarms. A stopped RDS "
+    "instance keeps its data and bills storage only (~$0.003/hour)."
 )
 PROTECTED = (
     "Never touched: secrets, ECR repositories and images, S3 buckets, Cognito, "
@@ -87,6 +97,7 @@ class Clients:
     tagging: Any
     ecs: Any
     elbv2: Any
+    rds: Any
     s3: Any
     sns: Any
 
@@ -96,6 +107,7 @@ class Clients:
             tagging=boto3.client("resourcegroupstaggingapi"),
             ecs=boto3.client("ecs"),
             elbv2=boto3.client("elbv2"),
+            rds=boto3.client("rds"),
             s3=boto3.client("s3"),
             sns=boto3.client("sns"),
         )
@@ -104,9 +116,11 @@ class Clients:
 @dataclass
 class Resource:
     arn: str
-    kind: str  # "ecs-service" or "load-balancer"
+    kind: str  # "ecs-service", "load-balancer" or "db-instance"
     label: str
     cluster: str = ""
+    identifier: str = ""
+    status: str = ""
     desired_count: int = 0
     created: datetime | None = None
     billable: bool = False
@@ -186,6 +200,8 @@ def parse_names(arn: str) -> tuple[str, list[str]] | None:
         return "ecs-service", [parts[1], parts[2]]
     if parts[:2] == ["loadbalancer", "app"] and len(parts) == 4:  # loadbalancer/app/<name>/<id>
         return "load-balancer", [parts[2]]
+    if resource.startswith("db:") and len(parts) == 1:  # db:<identifier>
+        return "db-instance", [resource[len("db:") :]]
     return None
 
 
@@ -204,7 +220,7 @@ def discover(cfg: Config, clients: Clients) -> list[tuple[str, dict[str, str]]]:
     found: list[tuple[str, dict[str, str]]] = []
     for page in paginator.paginate(
         TagFilters=[{"Key": k, "Values": [v]} for k, v in cfg.required_tags.items()],
-        ResourceTypeFilters=[ECS_SERVICE_TYPE, LOAD_BALANCER_TYPE],
+        ResourceTypeFilters=[ECS_SERVICE_TYPE, LOAD_BALANCER_TYPE, DB_INSTANCE_TYPE],
     ):
         for mapping in page.get("ResourceTagMappingList", []):
             tags = {t["Key"]: t["Value"] for t in mapping.get("Tags", [])}
@@ -233,6 +249,26 @@ def describe(arn: str, kind: str, names: list[str], clients: Clients) -> Resourc
             desired_count=svc.get("desiredCount", 0),
             created=svc.get("createdAt"),
             billable=running > 0,
+        )
+
+    if kind == "db-instance":
+        identifier = names[0]
+        try:
+            out = clients.rds.describe_db_instances(DBInstanceIdentifier=identifier)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "DBInstanceNotFound":
+                return None
+            raise
+        db = out["DBInstances"][0]
+        status = str(db.get("DBInstanceStatus", ""))
+        return Resource(
+            arn=arn,
+            kind=kind,
+            label=f"RDS instance {identifier}",
+            identifier=identifier,
+            status=status,
+            created=db.get("InstanceCreateTime"),
+            billable=status not in DB_NOT_BILLABLE,
         )
 
     try:
@@ -285,8 +321,12 @@ def take_inventory(cfg: Config, clients: Clients) -> Inventory:
 
 
 # ---------------------------------------------------------------------------
-# Shutdown - ECS first (stops compute and Bedrock calls), then load balancers
+# Shutdown - ECS first (stops compute and Bedrock calls, and the database's
+# only client), then load balancers, then the database
 # ---------------------------------------------------------------------------
+SHUTDOWN_ORDER = {"ecs-service": 0, "load-balancer": 1, "db-instance": 2}
+
+
 def shut_down(
     resources: list[Resource], cfg: Config, clients: Clients
 ) -> tuple[list[str], list[str]]:
@@ -294,7 +334,7 @@ def shut_down(
     errors: list[str] = []
     verb = "WOULD " if cfg.dry_run else ""
 
-    for r in sorted(resources, key=lambda r: r.kind != "ecs-service"):
+    for r in sorted(resources, key=lambda r: SHUTDOWN_ORDER[r.kind]):
         try:
             if r.kind == "ecs-service":
                 if r.desired_count == 0:
@@ -303,6 +343,10 @@ def shut_down(
                 if not cfg.dry_run:
                     clients.ecs.update_service(cluster=r.cluster, service=r.arn, desiredCount=0)
                 actions.append(f"{verb}scale {r.label} from {r.desired_count} to 0 tasks")
+            elif r.kind == "db-instance":
+                if not cfg.dry_run:
+                    clients.rds.stop_db_instance(DBInstanceIdentifier=r.identifier)
+                actions.append(f"{verb}stop {r.label} (status {r.status}; data and storage kept)")
             else:
                 if not cfg.dry_run:
                     clients.elbv2.delete_load_balancer(LoadBalancerArn=r.arn)

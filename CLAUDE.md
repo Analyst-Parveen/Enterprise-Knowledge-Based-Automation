@@ -15,10 +15,15 @@ in PROJECT.md section 18, operating detail in [RUNBOOK.md](RUNBOOK.md) Part B:
 
 - Account on the AWS **Paid** plan (the Free plan blocks CodeDeploy), `us-west-2`.
 - Four Terraform states: `baseline` and `cost-guard` (protected), `dev` (ephemeral),
-  `frontend` (Amplify + CloudFront, persistent — implemented, not applied yet).
-- CodeDeploy blue-green deployments succeed; `verify.sh` passes.
-- Cost guard applied with **`dry_run = true`**. Never set it to `false` without
-  explicit user approval.
+  `frontend` (Amplify + CloudFront, persistent — applied, live).
+- PostgreSQL on AWS is **Amazon RDS** (`ekba-dev-postgres`, `db.t4g.micro`,
+  private subnets, SG from the task SG only), part of the `dev` stack. The
+  Postgres sidecar is gone. Data survives task replacement; `destroy.sh`
+  snapshots it and `deploy.sh` restores the newest snapshot.
+- CodeDeploy blue-green deployments succeed; `verify.sh` passes (health +
+  readiness incl. RDS, RDS posture).
+- Cost guard applied with **`dry_run = true`** (it stops RDS, never deletes it).
+  Never set it to `false` without explicit user approval.
 - Bedrock quotas are 0 in the account — no chat or demo data on AWS yet.
 - `rollback.sh` does not shift traffic yet (placeholder).
 
@@ -52,11 +57,13 @@ in PROJECT.md section 18, operating detail in [RUNBOOK.md](RUNBOOK.md) Part B:
   Nothing but the configured embedding model ever produces embeddings.
 - **Cost: $20 hard ceiling**, measured gross of credits (credits pay first, but
   a ceiling measured after credits reads $0 until they run out). Local Docker
-  Compose for all development at $0. AWS only for demos, at ~$0.09/hour. **No NAT Gateway, no RDS, no
-  ElastiCache, no EKS, no EFS — those resources must not appear in the Terraform
-  at all.** Postgres, Qdrant, and Redis run as containers and are re-seeded on
-  every deploy. The environment is ephemeral:
-  `setup -> test -> demo -> DESTROY -> setup again`.
+  Compose for all development at $0. AWS only for demos, at ~$0.11/hour. **No NAT
+  Gateway, no ElastiCache, no EKS, no EFS — those resources must not appear in
+  the Terraform at all.** Exactly **one** RDS instance (`modules/database`,
+  `db.t4g.micro`, single-AZ, private, write-only password) lives in the ephemeral
+  `dev` stack; ~$14/month if it ever ran 24/7, so it must not. Qdrant and Redis
+  run as containers and are re-seeded on every deploy. The environment is
+  ephemeral: `setup -> test -> demo -> DESTROY (snapshot DB) -> setup again`.
 - **`destroy.sh` is the normal end of a session**, not an emergency measure.
   Before any action that leaves something billable running, say so explicitly.
 
@@ -79,7 +86,7 @@ in PROJECT.md section 18, operating detail in [RUNBOOK.md](RUNBOOK.md) Part B:
 ./scripts/seed.sh        # local stack only; on AWS the task seeds itself
 ./scripts/test-e2e.sh    # local stack only
 ./scripts/rollback.sh    # application-level only, never destroys (traffic shift not built yet)
-./scripts/destroy.sh     # the ONLY sanctioned terraform destroy path
+./scripts/destroy.sh     # snapshots RDS, then the ONLY sanctioned terraform destroy path
 
 ./scripts/deploy-frontend.sh [--plan-only]   # Amplify frontend + CloudFront API + backend wiring + verify
 ./scripts/rollback-frontend.sh [--to <sha>]  # rebuild an earlier frontend commit (app-level only)

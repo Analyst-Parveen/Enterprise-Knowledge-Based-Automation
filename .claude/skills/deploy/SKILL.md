@@ -139,7 +139,8 @@ cost impact. No secret values in the report.
 
 ## Step 8 — Cost reminder
 
-Remind the user that the environment is ephemeral by design, burns ~$0.09/hour,
+Remind the user that the environment is ephemeral by design, burns ~$0.11/hour
+(including the RDS database),
 and that `./scripts/destroy.sh` should be run when the demo is finished, so
 nothing expensive stays running. State whether the cost guard is armed
 (`./scripts/cost-check.sh`) — while it is in dry-run, nothing stops the stack

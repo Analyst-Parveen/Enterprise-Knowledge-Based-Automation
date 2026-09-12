@@ -128,7 +128,25 @@ jobs:
       # ---- infrastructure --------------------------------------------------
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.9.8"
+          # 1.11+: the RDS password is a write-only argument (never in state).
+          terraform_version: "1.15.8"
+
+      # A NEW database instance is rebuilt from the newest snapshot destroy.sh
+      # took (same logic as scripts/deploy.sh). Ignored while the instance exists.
+      - name: Find the database snapshot to restore
+        id: snapshot
+        env:
+          DB: ${{ env.PROJECT_CODE }}-${{ inputs.environment }}-postgres
+        run: |
+          ID=""
+          if ! aws rds describe-db-instances --db-instance-identifier "$DB" >/dev/null 2>&1; then
+            ID=$(aws rds describe-db-snapshots --db-instance-identifier "$DB" --snapshot-type manual \
+              --query 'reverse(sort_by(DBSnapshots[?Status==`available`], &SnapshotCreateTime))[0].DBSnapshotIdentifier' \
+              --output text)
+            [ "$ID" = "None" ] && ID=""
+          fi
+          echo "restore snapshot: ${ID:-none}"
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
 
       - name: Terraform plan
         working-directory: infra/terraform/envs/${{ inputs.environment }}
@@ -138,6 +156,7 @@ jobs:
           TF_VAR_allowed_cidrs: '["${{ vars.DEMO_ALLOWED_CIDR }}"]'
           TF_VAR_s3_bucket: ${{ vars.S3_BUCKET }}
           TF_VAR_cognito_client_id: ${{ vars.COGNITO_CLIENT_ID }}
+          TF_VAR_restore_snapshot_id: ${{ steps.snapshot.outputs.id }}
         run: |
           terraform init -input=false \
             -backend-config="bucket=ekba-tfstate-${{ vars.EXPECTED_AWS_ACCOUNT_ID }}" \
@@ -153,8 +172,10 @@ jobs:
       - name: Reject destructive plans
         working-directory: infra/terraform/envs/${{ inputs.environment }}
         run: |
-          DESTROYS=$(terraform show -json tfplan \
-            | grep -o '"actions":\["delete"\]' | wc -l)
+          # Rendered plan, not raw JSON: the JSON drift section reports
+          # resources deleted OUTSIDE Terraform as {"actions":["delete"]}.
+          DESTROYS=$(terraform show -no-color tfplan \
+            | grep -cE '^[[:space:]]+# .* will be destroyed' || true)
           echo "resources to be destroyed: $DESTROYS"
           if [ "$DESTROYS" -gt 0 ]; then
             terraform show -no-color tfplan | grep -E '^\s+# .*(destroyed|replaced)' || true
@@ -222,9 +243,9 @@ jobs:
           EXPECTED_AWS_ACCOUNT_ID: ${{ vars.EXPECTED_AWS_ACCOUNT_ID }}
           API_URL: ${{ env.APP_URL }}
 
-      # No seed/e2e step here: the task seeds itself at startup (Postgres is a
-      # private sidecar nothing outside the task can reach), and seed.sh /
-      # test-e2e.sh target the LOCAL stack, not the deployed one.
+      # No seed/e2e step here: the task migrates and seeds itself at startup
+      # (RDS is in private subnets nothing outside the VPC can reach), and
+      # seed.sh / test-e2e.sh target the LOCAL stack, not the deployed one.
 
       # ---- rollback --------------------------------------------------------
       - name: Roll back on failure
@@ -238,4 +259,4 @@ jobs:
       - name: Cost reminder
         if: always()
         run: |
-          echo "::notice::Burning ~\$0.072/hour. Run scripts/destroy.sh when the demo ends."
+          echo "::notice::Burning ~\$0.11/hour (incl. RDS). Run scripts/destroy.sh when the demo ends - it snapshots the database first."

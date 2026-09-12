@@ -116,19 +116,24 @@ drift you did not cause, and never "fix" drift by deleting a resource.
 reject anything that does not fit.
 
 **These resources must not appear in the plan at all** — if one does, it is a bug:
-`aws_nat_gateway`, `aws_db_instance`, `aws_elasticache_*`, `aws_eks_*`,
-`aws_efs_*`.
+`aws_nat_gateway`, `aws_elasticache_*`, `aws_eks_*`, `aws_efs_*`.
 
-Postgres, Qdrant, and Redis are containers in the Fargate task, not managed
+Exactly one `aws_db_instance` is expected: `ekba-dev-postgres` from
+`modules/database` (`db.t4g.micro`, single-AZ, private, encrypted, write-only
+password). A second one, a bigger class, Multi-AZ or `publicly_accessible = true`
+is a bug. Qdrant and Redis are containers in the Fargate task, not managed
 services. The task runs in a public subnet with `assign_public_ip = true` so it
-reaches ECR without a NAT Gateway. Smallest viable sizing (1 vCPU / 3 GB, four
-containers) by default. ALB ingress restricted to `allowed_cidrs` (one operator
+reaches ECR without a NAT Gateway; the private subnets have no internet route and
+hold only the database. Smallest viable sizing (1 vCPU / 3 GB, three containers)
+by default. ALB ingress restricted to `allowed_cidrs` (one operator
 `/32` in `envs/dev/terraform.tfvars`; `DEMO_ALLOWED_CIDR` in the GitHub
 workflow), never `0.0.0.0/0`. When the operator's IP changes, updating it is a
 one-resource, in-place security-group change.
 
-The stack burns ~$0.09/hour. Cost is measured gross of credits; the cost guard
-stops it at $18 of gross usage once armed. Run `scripts/cost-check.sh` before and
+The stack burns ~$0.11/hour (including RDS). Cost is measured gross of credits;
+the cost guard stops it — ECS to zero, ALB deleted, RDS stopped — at $18 of gross
+usage once armed. A plan that would destroy `aws_db_instance` outside
+`destroy.sh` is a bug: the data lives there. Run `scripts/cost-check.sh` before and
 after every session.
 
 ## Never

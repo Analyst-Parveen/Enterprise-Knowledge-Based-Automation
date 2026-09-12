@@ -1,11 +1,16 @@
 ##############################################################################
-# Network - public subnets only. NO NAT GATEWAY.
+# Network - public subnets for the ALB and tasks, private subnets for RDS.
+# NO NAT GATEWAY.
 #
 # A NAT Gateway costs ~$32/month plus data, which alone would consume more than
 # the entire $20 budget. Fargate tasks run in public subnets with a public IP so
 # they can reach ECR, Bedrock and Transcribe directly. The security group - not
 # the subnet - is what keeps them private: nothing but the ALB can reach the
 # tasks, and the ALB only accepts traffic from the operator's own IP.
+#
+# The private subnets hold only the RDS database. Their route table has no
+# internet route at all (the database needs none), so they cost nothing and
+# need no NAT.
 #
 # See .claude/rules/aws-infrastructure.md section 5.
 ##############################################################################
@@ -59,6 +64,33 @@ resource "aws_route_table_association" "public" {
 
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
+}
+
+# Private subnets - RDS only. A DB subnet group needs two AZs even for a
+# single-AZ instance. Offset 10 keeps them clear of the public /24s.
+resource "aws_subnet" "private" {
+  count = length(local.azs)
+
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, 10 + count.index)
+  availability_zone       = local.azs[count.index]
+  map_public_ip_on_launch = false
+
+  tags = { Name = "${var.name}-private-${local.azs[count.index]}" }
+}
+
+# No routes beyond the implicit VPC-local one: nothing in these subnets can
+# reach, or be reached from, the internet.
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${var.name}-private" }
+}
+
+resource "aws_route_table_association" "private" {
+  count = length(aws_subnet.private)
+
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
 }
 
 ##############################################################################
@@ -149,4 +181,23 @@ resource "aws_security_group" "tasks" {
   }
 
   tags = { Name = "${var.name}-tasks" }
+}
+
+# Database: PostgreSQL from the task security group ONLY. No CIDR rule, no
+# egress rule (Terraform removes the AWS default allow-all egress) - the
+# database never initiates connections.
+resource "aws_security_group" "db" {
+  name        = "${var.name}-db"
+  description = "RDS PostgreSQL - ingress from the Fargate task security group only"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "PostgreSQL from the backend tasks"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.tasks.id]
+  }
+
+  tags = { Name = "${var.name}-db" }
 }

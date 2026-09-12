@@ -1,9 +1,10 @@
 ##############################################################################
 # ALB + ECS Fargate + CodeDeploy blue-green.
 #
-# ONE Fargate task runs every container: API, Postgres, Qdrant and Redis. No
-# RDS, no ElastiCache, no EFS. Data is ephemeral by design and re-seeded on
-# every deploy - that is what makes the $20 ceiling achievable.
+# ONE Fargate task runs the API, Qdrant and Redis. PostgreSQL is a small RDS
+# instance in private subnets (modules/database), so relational data survives
+# task replacement; Qdrant and Redis stay ephemeral and are re-seeded on every
+# deploy. No ElastiCache, no EFS - that is what keeps the $20 ceiling.
 #
 # Blue-green needs TWO target groups. CodeDeploy registers the new task set in
 # the idle one, health-checks it through the test listener, and only then moves
@@ -246,24 +247,44 @@ resource "aws_ecs_task_definition" "app" {
       image     = var.backend_image
       essential = true
 
-      # Postgres is a fresh sidecar on every task, so the schema must be created
-      # at startup - the image's default CMD is only uvicorn. The demo data is
-      # re-seeded here too ("re-seeded on every deploy"). The seed is non-fatal:
-      # a Bedrock quota or throttling problem must not stop the API serving.
+      # The database is RDS, reached over TLS (ssl=require). DATABASE_URL is
+      # assembled here from DB_* config plus the injected DB_PASSWORD secret, so
+      # no connection string with a password exists in Terraform, the task
+      # definition or the image. The hex password is URL-safe by construction
+      # (scripts/set-secrets.sh).
+      #
+      # Migrations run at startup: alembic upgrade head is a no-op when the
+      # schema is already at head, and migrations are written backward
+      # compatible, because the blue task keeps serving from the same database
+      # while green starts. The seed upserts by stable IDs, so re-running it on
+      # a persistent database duplicates nothing. It is non-fatal: a Bedrock
+      # quota or throttling problem must not stop the API serving.
       command = [
         "sh", "-c",
-        "alembic upgrade head && (python -m seeds.seed || echo 'seed failed - continuing without demo data') && exec uvicorn app.main:app --host 0.0.0.0 --port ${var.container_port}",
+        join(" && ", [
+          "export DATABASE_URL=\"postgresql+asyncpg://$${DB_USER}:$${DB_PASSWORD}@$${DB_HOST}:$${DB_PORT}/$${DB_NAME}?ssl=require\"",
+          "alembic upgrade head",
+          "(python -m seeds.seed || echo 'seed failed - continuing without demo data')",
+          "exec uvicorn app.main:app --host 0.0.0.0 --port ${var.container_port}",
+        ]),
       ]
 
       portMappings = [{ containerPort = var.container_port, protocol = "tcp" }]
 
-      environment = [
-        for k, v in var.environment_variables : { name = k, value = v }
-      ]
+      environment = concat(
+        [for k, v in var.environment_variables : { name = k, value = v }],
+        [
+          { name = "DB_HOST", value = var.database.host },
+          { name = "DB_PORT", value = tostring(var.database.port) },
+          { name = "DB_NAME", value = var.database.name },
+          { name = "DB_USER", value = var.database.user },
+        ],
+      )
 
-      secrets = [
-        for k, v in var.secret_environment : { name = k, valueFrom = v }
-      ]
+      secrets = concat(
+        [for k, v in var.secret_environment : { name = k, valueFrom = v }],
+        [{ name = "DB_PASSWORD", valueFrom = var.database.password_secret }],
+      )
 
       # Non-root, read-only root filesystem where the app allows it.
       user                   = "10001"
@@ -286,41 +307,11 @@ resource "aws_ecs_task_definition" "app" {
         startPeriod = 60
       }
 
+      # PostgreSQL is RDS, outside the task - nothing to wait for here.
       dependsOn = [
-        { containerName = "postgres", condition = "HEALTHY" },
         { containerName = "qdrant", condition = "START" },
         { containerName = "redis", condition = "HEALTHY" },
       ]
-    },
-
-    # ---- Postgres as a container (no RDS) ------------------------------
-    {
-      name      = "postgres"
-      image     = "postgres:16-alpine"
-      essential = true
-
-      environment = [
-        { name = "POSTGRES_USER", value = "ekba" },
-        { name = "POSTGRES_DB", value = "ekba" },
-      ]
-      secrets = [{ name = "POSTGRES_PASSWORD", valueFrom = var.postgres_password_secret_arn }]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.service.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "postgres"
-        }
-      }
-
-      healthCheck = {
-        command     = ["CMD-SHELL", "pg_isready -U ekba"]
-        interval    = 10
-        timeout     = 5
-        retries     = 5
-        startPeriod = 30
-      }
     },
 
     # ---- Qdrant as a container (no managed vector service) -------------

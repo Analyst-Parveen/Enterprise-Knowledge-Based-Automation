@@ -28,7 +28,17 @@ output "log_group" {
   value = module.service.log_group
 }
 
+output "db_identifier" {
+  description = "RDS instance; destroy.sh snapshots it before destroying the stack."
+  value       = module.database.identifier
+}
+
+output "db_address" {
+  description = "Private endpoint - resolvable and reachable only from inside the VPC."
+  value       = module.database.address
+}
+
 output "cost_reminder" {
   description = "Read this every time."
-  value       = "Burning ${module.service.hourly_cost_estimate_usd} USD/hour. Run scripts/destroy.sh when the demo ends."
+  value       = "Burning ${module.service.hourly_cost_estimate_usd} USD/hour for the service, plus ~0.019 USD/hour for RDS (db.t4g.micro + 20 GB gp3). Run scripts/destroy.sh when the demo ends."
 }

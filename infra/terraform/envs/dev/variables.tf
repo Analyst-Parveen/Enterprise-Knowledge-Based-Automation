@@ -182,3 +182,32 @@ variable "rollback_window_minutes" {
   type    = number
   default = 5
 }
+
+# -- database (RDS PostgreSQL) ----------------------------------------------
+variable "db_instance_class" {
+  description = "RDS instance class. db.t4g.micro: ~$0.016/hour while the stack exists."
+  type        = string
+  default     = "db.t4g.micro"
+}
+
+variable "db_allocated_storage" {
+  description = "RDS gp3 storage in GB (20 = the minimum, ~$2.30/month while it exists)."
+  type        = number
+  default     = 20
+}
+
+variable "db_backup_retention_days" {
+  description = "Automated backup retention in days (free up to the allocated storage)."
+  type        = number
+  default     = 1
+}
+
+variable "restore_snapshot_id" {
+  description = <<-EOT
+    Manual RDS snapshot to rebuild the database from when the instance is
+    CREATED. scripts/deploy.sh sets it to the newest snapshot destroy.sh took;
+    empty means an empty database. Ignored while the instance exists.
+  EOT
+  type        = string
+  default     = ""
+}

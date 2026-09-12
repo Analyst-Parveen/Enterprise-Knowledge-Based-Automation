@@ -5,7 +5,7 @@ Two ways to run it:
 | | Where | Cost | Needs |
 |---|---|---|---|
 | **Part A — Local** | Docker Compose on your machine | **$0** | Docker, Python 3.11+, Node 22+ |
-| **Part B — AWS** | ECS Fargate, ephemeral | **~$0.09/hour** (~$0.37 per 4-hour session) | An AWS account on the **Paid** plan, Terraform, AWS CLI, Docker |
+| **Part B — AWS** | ECS Fargate + RDS, ephemeral | **~$0.11/hour** (~$0.44 per 4-hour session) | An AWS account on the **Paid** plan, Terraform, AWS CLI, Docker |
 
 **Do Part A first.** Everything works locally with no AWS account at all. Only
 go to Part B when you want to prove the deployment story.
@@ -305,7 +305,7 @@ Cost is roughly **$0.0002 per question**.
 > cd backend && alembic upgrade head && python -m seeds.seed
 > ```
 
-# PART B — Deploying to AWS (~$0.09/hour while it exists)
+# PART B — Deploying to AWS (~$0.11/hour while it exists)
 
 ## Where things stand (last verified 2026-09-11)
 
@@ -317,8 +317,9 @@ Cost is roughly **$0.0002 per question**.
 | Protected baseline (`envs/baseline`) | Applied |
 | Cost guard (`envs/cost-guard`) | Applied, **`dry_run = true`**: it reports, it does not act |
 | Ephemeral stack (`envs/dev`) | Deployed; CodeDeploy blue-green deployments succeed and `verify.sh` passes |
+| Database | **Amazon RDS PostgreSQL 16** (`ekba-dev-postgres`, `db.t4g.micro`, private). Replaced the Postgres sidecar on 2026-09-11; data survives task replacement and, via snapshot, a destroy |
 | Bedrock | Inference quotas are **0** in this account: the API is healthy, but chat and demo seeding cannot run (Step 2) |
-| Frontend (`envs/frontend`, Amplify) | Code and scripts ready; **not applied yet** — see [Part C](#part-c--frontend-on-aws-amplify) |
+| Frontend (`envs/frontend`, Amplify) | **Live** — see [Part C](#part-c--frontend-on-aws-amplify) |
 
 ## Understand the split first
 
@@ -494,9 +495,12 @@ generated values that go straight to Secrets Manager — never through Terraform
 state, git, a command-line argument, or your terminal. A secret that already has
 a value is **left untouched**.
 
-The database secret is JSON with two keys built from **one** password — the
-Postgres container reads `…:password::`, the API reads `…:url::` — so the two can
-never drift apart.
+The database secret is JSON. Only its `password` key is used, in two places, so
+they can never drift apart: Terraform creates RDS with it (read through an
+*ephemeral* resource into the **write-only** `password_wo` argument, so it never
+lands in state), and the API container receives it as `DB_PASSWORD` and builds
+`DATABASE_URL` from it. Secrets created before the move to RDS also carry a
+`url` key for the old Postgres sidecar; nothing reads it any more.
 
 ## Step 4b — Apply the cost guard (once)
 
@@ -615,10 +619,13 @@ In order, stopping at the first failure:
 Observed timing: about 11–12 minutes end to end, of which the CodeDeploy
 deployment is about 9 (including the 5-minute rollback window).
 
-Inside the task, the API container runs `alembic upgrade head`, then seeds the
-demo data, then starts uvicorn — Postgres is a fresh private sidecar on every
-task, so this is the only place the schema and data can be created. A failed
-seed (for example, Bedrock quota still `0`) does not stop the API.
+Inside the task, the API container assembles `DATABASE_URL` from the `DB_*`
+settings plus the injected `DB_PASSWORD`, runs `alembic upgrade head` against
+**RDS**, seeds the demo data, then starts uvicorn. RDS is in private subnets that
+nothing outside the VPC can reach, so this is the only place the schema and data
+can be created. Both steps are safe to repeat: the migration is a no-op once the
+schema is current, and the seed upserts by stable IDs. A failed seed (for
+example, Bedrock quota still `0`) does not stop the API.
 
 Check it from your machine:
 
@@ -808,11 +815,15 @@ It will:
 2. Print **every resource** it would destroy
 3. **Scan the plan for protected resources and abort** if any appear
 4. Require you to type `DESTROY ekba-dev` exactly — not `y`
-5. Destroy only what is in the `envs/dev` state
-6. Confirm your secrets survived, and write an audit report
+5. **Snapshot the database** (`ekba-dev-postgres-<UTC timestamp>`) and wait for it
+   to complete — if the snapshot fails, **nothing is destroyed**
+6. Destroy only what is in the `envs/dev` state
+7. Confirm your secrets survived, and write an audit report
 
 **Preserved, always:** secrets, Terraform state, ECR images, budgets, audit logs,
-and the whole cost guard.
+the whole cost guard — and your database content, as that manual snapshot. The
+next `deploy.sh` finds the newest snapshot and builds the new instance from it,
+so tenants, users, documents, conversations and audit rows come back.
 
 If the **cost guard** stopped the stack (ECS at 0 tasks, ALB deleted), run
 `destroy.sh` to clean up the rest, then `deploy.sh`. `deploy.sh` on its own would
@@ -823,6 +834,64 @@ Confirm you are back to $0/hour:
 ```bash
 ./scripts/cost-check.sh      # should report nothing billable running
 ```
+
+## Step 8b — The database (Amazon RDS)
+
+PostgreSQL on AWS is `ekba-dev-postgres`: `db.t4g.micro`, single-AZ, 20 GB gp3,
+encrypted, in two **private subnets with no internet route**, reachable only from
+the backend task's security group on port 5432. It is part of the `envs/dev`
+stack, so it exists only between `deploy.sh` and `destroy.sh`.
+
+**The password never travels.** Terraform reads the `password` key of
+`ekba/dev/backend/database-url` through an *ephemeral* Secrets Manager resource
+into the **write-only** `password_wo` argument — it is not in the state file, the
+plan, or any log. The API container gets the same key as `DB_PASSWORD` and builds
+`DATABASE_URL` itself, connecting with `ssl=require`.
+
+**What survives what:**
+
+| Event | PostgreSQL data |
+|---|---|
+| New task / CodeDeploy release / task crash | **Kept** |
+| `deploy.sh` (even with a new image) | **Kept** |
+| Cost guard stops the instance | **Kept** (stopped, storage billed; AWS restarts it after 7 days) |
+| `destroy.sh` | **Kept as a manual snapshot**, restored by the next `deploy.sh` |
+
+Qdrant and Redis are still sidecar containers: **vectors and cache are lost on
+every task replacement.** The seed re-indexes its own demo documents at startup,
+but a document *you* uploaded keeps its row and its S3 file while losing its
+vectors, so it stops being retrievable until it is uploaded again. A re-index job
+is not implemented.
+
+**Look at it (read-only):**
+
+```bash
+aws rds describe-db-instances --db-instance-identifier ekba-dev-postgres \
+  --query 'DBInstances[0].[DBInstanceStatus,PubliclyAccessible,StorageEncrypted,Endpoint.Address]' --output text
+
+# snapshots that destroy.sh has taken, newest first
+aws rds describe-db-snapshots --db-instance-identifier ekba-dev-postgres \
+  --snapshot-type manual --query 'reverse(sort_by(DBSnapshots,&SnapshotCreateTime))[].[DBSnapshotIdentifier,Status,SnapshotCreateTime]' \
+  --output table
+```
+
+Nothing outside the VPC can open a psql session to it — that is the point. To see
+the rows, use the API (`/api/v1/admin/metrics`, `/api/v1/documents`), the app
+logs, or a one-off ECS task on the same security group.
+
+**Restoring happens by itself.** `deploy.sh` looks for the instance; if it is
+gone it passes the newest snapshot as `-var restore_snapshot_id=…` and Terraform
+builds the new instance from it (~10 minutes). To start from an empty database
+instead, delete nothing — just tell Terraform to ignore snapshots for that run:
+
+```bash
+# inside infra/terraform/envs/dev, only if you deliberately want an empty database
+terraform plan -var="restore_snapshot_id=" -var="backend_image=<image>"
+```
+
+Snapshots are never deleted automatically. They cost ~$0.095 per GB of snapshot
+data per month (cents here). Delete an old one only deliberately:
+`aws rds delete-db-snapshot --db-snapshot-identifier <id>`.
 
 ## Step 9 — Deploy again
 
@@ -1125,8 +1194,9 @@ During step 4, v1 and v2 are *both* running against the *same* database. So:
 A destructive schema change is split across two releases: release A adds the new
 shape and writes to both; release B removes the old one once nothing reads it.
 
-(In the AWS demo each task has its own Postgres sidecar, so today the two versions
-do not literally share a database. The rule is kept so the design holds once they
+(Since the move to RDS this is literal on AWS too: blue and green connect to the
+same database, and green runs `alembic upgrade head` while blue is still serving.
+The rule held even before, so the design holds once they
 do.)
 
 ## The trade-off, honestly
@@ -1200,6 +1270,11 @@ which is a fine price for a rollback that takes seconds instead of a rebuild.
 | `DeploymentTargetDoesNotExistException` | ECS target ID format | `--target-id ekba-dev:ekba-dev` |
 | `InvalidParameterException … logGroupName` in Git Bash | MSYS path conversion | `MSYS_NO_PATHCONV=1 aws logs …` |
 | `Too many command line arguments` from Terraform in PowerShell | PowerShell 5.1 splits `-backend-config=backend.hcl` | Quote the argument, or use Git Bash |
+| `/api/v1/health/ready` returns 503 with `postgres` unhealthy | The task cannot reach RDS: instance stopped, or the DB security group no longer admits the task SG | `aws rds describe-db-instances --db-instance-identifier ekba-dev-postgres --query 'DBInstances[0].DBInstanceStatus'`; `deploy.sh` starts a stopped instance automatically |
+| Task keeps restarting, logs show `OperationalError`/`ConnectionRefused` at startup | Same, or the migration could not connect | Check the readiness endpoint and the instance status before touching application code |
+| `deploy.sh` says `instance is 'stopping'` and refuses | The cost guard (or a console action) is stopping the database | Wait until it is `stopped`, then rerun — `deploy.sh` starts it again |
+| `destroy.sh` aborts with `could not start the snapshot. NOTHING was destroyed.` | The database is mid-modification or otherwise not snapshot-able | Wait for `available`, then rerun. This is deliberate: no snapshot, no destroy |
+| An uploaded document returns "not found in your knowledge base" after a redeploy | Qdrant is a task-local sidecar: its vectors were lost while the Postgres row survived | Upload the document again (a re-index job is not implemented) |
 
 **How to tell "the app is broken" from "you cannot reach it":**
 
@@ -1251,9 +1326,10 @@ means the application is fine and the security group is dropping you.
 |---|---|
 | All local development | **$0** |
 | Local with real Bedrock | ~$0.0002 per question |
-| The AWS stack, per hour it exists | **~$0.09** (list-price estimate: Fargate 1 vCPU / 3 GB ~$0.054, ALB ~$0.023 + LCUs, 3 public IPv4 addresses ~$0.015) |
-| One 4-hour AWS demo | **~$0.37** |
-| The AWS stack forgotten for a month | ~$66 |
+| The AWS stack, per hour it exists | **~$0.11** (list-price estimate: Fargate 1 vCPU / 3 GB ~$0.054, ALB ~$0.023 + LCUs, 3 public IPv4 addresses ~$0.015, RDS `db.t4g.micro` ~$0.016 + 20 GB gp3 ~$0.003) |
+| One 4-hour AWS demo | **~$0.44** |
+| The AWS stack forgotten for a month | ~$80 (of which RDS ~$14) |
+| Database snapshots kept between sessions | a few cents/month (~$0.095 per GB of snapshot data) |
 | Protected baseline, at rest | ~$1.70/month, mostly 4 secrets × $0.40 |
 | Cost guard | ~$0 (free tiers) |
 | Frontend on Amplify | ~$0.04 per build (≈4 build-minutes at $0.01), cents for storage and transfer, ~$0 idle |
@@ -1275,10 +1351,12 @@ moment, which is why the cost guard measures usage *before* credits.
   of gross usage and on a forecast above $18; stops the stack at $18 of gross
   usage, on any charge credits did not cover, or after 8 hours
 - `deploy.sh` refuses to deploy at $18 of gross usage
-- `cost-check.sh` shows gross, credits and net spend, and alarms if a NAT Gateway
-  or RDS instance ever appears (they never should)
+- `cost-check.sh` shows gross, credits and net spend, reports the RDS instance and
+  its snapshots, and alarms if a NAT Gateway or an *unexpected* second database
+  ever appears
 - Baseline budget `ekba-dev-monthly`: $20 with 50/80/100% alerts — after credits
 - Per-user daily AI ceiling in the app ($0.50)
 
-**The single most important habit:** run `./scripts/destroy.sh` when a demo ends.
-Until the cost guard is armed, nothing else stops the ~$0.09/hour.
+**The single most important habit:** run `./scripts/destroy.sh` when a demo ends —
+it snapshots the database first, so nothing is lost. Until the cost guard is
+armed, nothing else stops the ~$0.11/hour.

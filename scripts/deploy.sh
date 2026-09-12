@@ -131,31 +131,74 @@ ok "image scan clean"
 export TF_VAR_backend_image="$IMAGE"
 
 # ---------------------------------------------------------------------------
-# 4. Infrastructure - plan, review, apply. NEVER auto-approve, NEVER destroy.
-#    .claude/rules/terraform.md section 4
+# 4a. Database. A new instance is built from the newest snapshot destroy.sh
+#     took, so data survives destroy -> deploy. A stopped instance (the cost
+#     guard stops RDS) is started, because the task cannot migrate or serve
+#     without it and Terraform cannot modify a stopped instance.
+# ---------------------------------------------------------------------------
+step "Database (RDS ${DB_INSTANCE_ID})"
+RESTORE_SNAPSHOT=""
+DB_STATUS="$(db_instance_status)"
+case "$DB_STATUS" in
+  "")
+    RESTORE_SNAPSHOT="$(latest_db_snapshot)"
+    if [ -n "$RESTORE_SNAPSHOT" ]; then
+      log "no instance - it will be restored from snapshot ${RESTORE_SNAPSHOT} (adds ~10 minutes)"
+    else
+      log "no instance and no snapshot - creating an empty database (adds ~10 minutes); the task migrates and seeds it"
+    fi
+    ;;
+  available)
+    ok "instance available - the data on it is kept"
+    ;;
+  stopped)
+    log "instance is stopped (by the cost guard?) - starting it"
+    aws rds start-db-instance --db-instance-identifier "$DB_INSTANCE_ID" --region "$AWS_REGION" >/dev/null \
+      || die "could not start ${DB_INSTANCE_ID}"
+    aws rds wait db-instance-available --db-instance-identifier "$DB_INSTANCE_ID" --region "$AWS_REGION" \
+      || die "${DB_INSTANCE_ID} did not become available"
+    ok "instance started"
+    ;;
+  stopping|deleting)
+    die "instance is '${DB_STATUS}' - wait until it settles, then rerun deploy.sh"
+    ;;
+  *)
+    log "instance is '${DB_STATUS}' - waiting for it to become available"
+    aws rds wait db-instance-available --db-instance-identifier "$DB_INSTANCE_ID" --region "$AWS_REGION" \
+      || die "${DB_INSTANCE_ID} did not become available"
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 4b. Infrastructure - plan, review, apply. NEVER auto-approve, NEVER destroy.
+#     .claude/rules/terraform.md section 4
 # ---------------------------------------------------------------------------
 step "Terraform: fmt, validate, plan"
 terraform -chdir="$TF_DIR" fmt -check -recursive || die "terraform fmt failed"
 terraform -chdir="$TF_DIR" validate              || die "terraform validate failed"
 # -var, not TF_VAR_: a terraform.tfvars value would silently override TF_VAR_
 # and deploy a stale image. -var takes precedence over every tfvars file.
+# restore_snapshot_id only matters when the instance is created; Terraform
+# ignores it for an existing instance.
 terraform -chdir="$TF_DIR" plan -input=false -out=tfplan \
-  -var="backend_image=${IMAGE}" || die "terraform plan failed"
+  -var="backend_image=${IMAGE}" \
+  -var="restore_snapshot_id=${RESTORE_SNAPSHOT}" || die "terraform plan failed"
 
 # A deploy must never destroy. Surface it and require a typed acknowledgement.
 step "Reviewing the plan for destructive changes"
+# Read the RENDERED plan, not raw JSON: the JSON also carries a drift section,
+# where a resource deleted OUTSIDE Terraform (a deregistered task definition,
+# say) appears as {"actions":["delete"]} without this plan deleting anything.
 # grep exits 1 when nothing matches - i.e. on every normal, non-destructive
 # plan - which under `set -euo pipefail` would kill the script silently here.
-# `|| true` scopes only to grep: zero matches means zero deletions.
-PLAN_JSON="$(terraform -chdir="$TF_DIR" show -json tfplan)" \
+PLAN_TEXT="$(terraform -chdir="$TF_DIR" show -no-color tfplan)" \
   || die "could not read the saved plan"
-DESTROY_COUNT="$(printf '%s' "$PLAN_JSON" \
-  | { grep -o '"actions":\["delete"\]' || true; } | wc -l | tr -d ' ')"
+DESTROY_COUNT="$(printf '%s' "$PLAN_TEXT" \
+  | { grep -cE '^[[:space:]]+# .* will be destroyed' || true; } | tr -d ' ')"
 
 if [ "${DESTROY_COUNT:-0}" -gt 0 ]; then
   err "plan contains ${DESTROY_COUNT} resource deletion(s)"
-  terraform -chdir="$TF_DIR" show -no-color tfplan \
-    | grep -E '^\s+#.*(destroyed|replaced)' || true
+  printf '%s' "$PLAN_TEXT" | grep -E '^[[:space:]]+# .* will be (destroyed|replaced)' || true
   warn "A deployment must not destroy resources. Review the plan above."
   confirm_phrase "I REVIEWED THIS PLAN"
 fi
@@ -171,8 +214,10 @@ export API_URL
 # ---------------------------------------------------------------------------
 # 5. Blue-green release
 #
-# Migrations run inside the task at startup (alembic upgrade head) and are
-# written backward-compatible, so a rollback needs no down-migration.
+# Migrations run inside the task at startup (alembic upgrade head) against
+# RDS, which blue and green share. They are written backward-compatible, so
+# blue keeps working while green migrates, and a rollback needs no
+# down-migration.
 # ---------------------------------------------------------------------------
 step "Release (CodeDeploy blue-green)"
 
@@ -206,10 +251,11 @@ ok "traffic shifted to the new version"
 #    A deploy that fails verification is a FAILED deploy.
 #
 #    Seeding happens inside the task at startup (alembic + seeds.seed in the
-#    container command), because Postgres is a private sidecar that nothing
-#    outside the task can reach. seed.sh and test-e2e.sh target the LOCAL
-#    stack, so running them here would test the wrong system - and fail the
-#    deploy whenever local Docker happens to be stopped.
+#    container command), because RDS sits in private subnets that nothing
+#    outside the VPC can reach. The seed upserts by stable IDs, so it never
+#    duplicates data on the persistent database. seed.sh and test-e2e.sh
+#    target the LOCAL stack, so running them here would test the wrong
+#    system - and fail the deploy whenever local Docker happens to be stopped.
 # ---------------------------------------------------------------------------
 DEPLOY_OK=1
 
@@ -246,8 +292,11 @@ report_header "$REPORT" "Deployment Report"
   printf -- '- Image: `%s`\n' "$IMAGE"
   printf -- '- CodeDeploy deployment: `%s`\n' "$DEPLOY_ID"
   printf -- '- App URL: %s\n' "${API_URL:-unknown}"
-  printf '\n## Cost\n\nThis environment is ephemeral and burns ~$0.072/hour.\n'
-  printf 'Run `scripts/destroy.sh` when the demo ends.\n'
+  printf '\n## Database\n\n'
+  printf -- '- RDS instance: `%s` (status before deploy: %s)\n' "$DB_INSTANCE_ID" "${DB_STATUS:-not present}"
+  printf -- '- Restored from snapshot: %s\n' "${RESTORE_SNAPSHOT:-no}"
+  printf '\n## Cost\n\nThis environment is ephemeral and burns ~$0.11/hour (incl. RDS ~$0.019/hour).\n'
+  printf 'Run `scripts/destroy.sh` when the demo ends - it snapshots the database first.\n'
 } >> "$REPORT"
 
 ok "report written: ${REPORT}"

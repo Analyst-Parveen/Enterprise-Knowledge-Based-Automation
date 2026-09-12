@@ -11,6 +11,9 @@
 #   * The Terraform state backend is PRESERVED.
 #   * The ECR repository and its images are PRESERVED (needed to redeploy).
 #   * Budgets, billing alarms and retained audit logs are PRESERVED.
+#   * The RDS database's DATA is PRESERVED: a manual snapshot is taken before
+#     anything is destroyed, and the destroy aborts if the snapshot fails.
+#     deploy.sh restores the newest snapshot next time.
 #   * Nothing outside this project is ever touched, under any circumstances.
 #
 # See .claude/rules/terraform.md section 5 and .claude/rules/aws-infrastructure.md
@@ -113,7 +116,45 @@ ok "no protected resources in the destroy plan"
 RESOURCE_COUNT="$(printf '%s\n' "$STATE_RESOURCES" | wc -l | tr -d ' ')"
 warn "About to destroy ${RESOURCE_COUNT} resource(s) owned by ${PROJECT_CODE}-${ENVIRONMENT}."
 warn "Secrets, Terraform state backend and ECR images will be PRESERVED."
+warn "The RDS database is snapshotted first; its data comes back on the next deploy."
 confirm_phrase "DESTROY ${PROJECT_CODE}-${ENVIRONMENT}"
+
+# ---------------------------------------------------------------------------
+# Snapshot the database BEFORE anything is destroyed. A manual snapshot is not
+# in Terraform state, so the destroy below cannot remove it. If it cannot be
+# taken, stop: destroying the instance would lose the data.
+# ---------------------------------------------------------------------------
+step "Snapshotting the database (${DB_INSTANCE_ID})"
+DB_SNAPSHOT=""
+DB_STATUS="$(db_instance_status)"
+case "$DB_STATUS" in
+  "")
+    log "no database instance - nothing to snapshot"
+    ;;
+  available|stopped)
+    if [ "$DB_STATUS" = "stopped" ]; then
+      # Start it first: a snapshot needs an available instance.
+      log "instance is stopped - starting it so it can be snapshotted"
+      aws rds start-db-instance --db-instance-identifier "$DB_INSTANCE_ID" --region "$AWS_REGION" >/dev/null \
+        || die "could not start ${DB_INSTANCE_ID} for its snapshot. NOTHING was destroyed."
+      aws rds wait db-instance-available --db-instance-identifier "$DB_INSTANCE_ID" --region "$AWS_REGION" \
+        || die "${DB_INSTANCE_ID} did not become available. NOTHING was destroyed."
+    fi
+    DB_SNAPSHOT="${DB_INSTANCE_ID}-$(date -u +%Y%m%d-%H%M%S)"
+    aws rds create-db-snapshot --region "$AWS_REGION" \
+        --db-instance-identifier "$DB_INSTANCE_ID" --db-snapshot-identifier "$DB_SNAPSHOT" \
+        --tags "Key=ProjectCode,Value=${PROJECT_CODE}" "Key=Environment,Value=${ENVIRONMENT}" \
+               "Key=Lifecycle,Value=protected" "Key=ManagedBy,Value=destroy.sh" >/dev/null \
+      || die "could not start the snapshot. NOTHING was destroyed."
+    log "waiting for snapshot ${DB_SNAPSHOT} (usually 3-10 minutes)"
+    aws rds wait db-snapshot-available --db-snapshot-identifier "$DB_SNAPSHOT" --region "$AWS_REGION" \
+      || die "snapshot ${DB_SNAPSHOT} did not complete. NOTHING was destroyed."
+    ok "snapshot ${DB_SNAPSHOT} is available - deploy.sh restores it next time"
+    ;;
+  *)
+    die "database is '${DB_STATUS}' - it cannot be snapshotted now. NOTHING was destroyed. Rerun when it is available."
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Destroy - the reviewed plan only, nothing else
@@ -144,6 +185,7 @@ report_header "$REPORT" "Destroy Audit Report"
   printf -- '- AWS Secrets Manager secrets and all credentials\n'
   printf -- '- Terraform state backend (S3 bucket + lock table)\n'
   printf -- '- ECR repository and images (required to redeploy)\n'
+  printf -- '- RDS data, as manual snapshot `%s`\n' "${DB_SNAPSHOT:-none - there was no database instance}"
   printf -- '- Budgets, billing alarms, retained audit log groups\n'
   printf -- '- Everything tagged `Lifecycle = "protected"`\n'
   printf -- '- Every resource outside this project state\n\n'

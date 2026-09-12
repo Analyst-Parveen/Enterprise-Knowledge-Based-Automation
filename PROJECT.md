@@ -53,13 +53,16 @@ served through secure, tenant-aware RAG and agentic automation.
 
 ### Data
 - **Vector DB:** Qdrant — runs as a container, never a managed service
-- **Database:** PostgreSQL — container in dev **and** in the ephemeral AWS demo.
-  No RDS. (Supabase is an option for a persistent free-tier demo.)
+- **Database:** PostgreSQL 16 — a container locally, **Amazon RDS**
+  (`db.t4g.micro`, private subnets) in the AWS demo, so data survives task
+  replacement. Approved 2026-09-11; replaced the Postgres sidecar.
 - **Cache:** Redis — container. **No ElastiCache.**
 - **Storage:** Amazon S3 (the only persistent data store in the demo)
 
-> All three data services run as containers alongside the API. They are
-> **re-seeded on every deploy**, which is what makes the $20 budget achievable.
+> Qdrant and Redis run as containers alongside the API and are **re-seeded on
+> every deploy**, which is what makes the $20 budget achievable. PostgreSQL is
+> the one managed service: a single small RDS instance that lives and dies with
+> the ephemeral stack, with its data carried between sessions as a snapshot.
 > See section 16.
 
 ### Identity
@@ -376,7 +379,7 @@ in minutes with freshly seeded data.
 | Environment | Where | Cost |
 |---|---|---|
 | **Local** — all day-to-day development | Docker Compose | **$0** |
-| **AWS demo** — deployed only when needed | ECS Fargate, ephemeral | ~$0.09 / hour (~$0.37 per 4-hour session) |
+| **AWS demo** — deployed only when needed | ECS Fargate + RDS, ephemeral | ~$0.11 / hour (~$0.44 per 4-hour session) |
 
 All development, testing, and iteration happens locally at zero cost. AWS is used
 only to prove the deployment story and run a live demo.
@@ -388,7 +391,8 @@ only to prove the deployment story and run a live demo.
 | Resource | Sizing | Approx. cost |
 |---|---|---|
 | Application Load Balancer | 1, across two AZs | ~$0.023 / hr + LCUs |
-| ECS Fargate task | 1 vCPU / 3 GB, all four containers in one task | ~$0.054 / hr |
+| ECS Fargate task | 1 vCPU / 3 GB, three containers in one task | ~$0.054 / hr |
+| RDS PostgreSQL | `db.t4g.micro`, single-AZ, 20 GB gp3, private | ~$0.016 / hr + ~$0.003 / hr storage |
 | Public IPv4 addresses | 2 on the ALB, 1 on the task | ~$0.015 / hr |
 | S3 | documents | pennies |
 | Cognito | user pool | free tier |
@@ -396,32 +400,52 @@ only to prove the deployment story and run a live demo.
 | Bedrock | per token | ~$0.01–0.05 / session |
 | Amazon Transcribe | per minute of audio | keep demo clips short |
 
-**A 4-hour demo session costs roughly $0.37** (list-price estimate). That is
-about 48 sessions before the $18 automatic shutdown. The protected baseline adds
-about $1.70/month at rest, mostly four Secrets Manager secrets.
+**A 4-hour demo session costs roughly $0.44** (list-price estimate). That is
+about 40 sessions before the $18 automatic shutdown. The protected baseline adds
+about $1.70/month at rest, mostly four Secrets Manager secrets, plus a few cents
+for the database snapshots kept between sessions.
+
+The database is the one resource that would break the budget if forgotten:
+**~$14/month running 24/7**. It therefore lives in the ephemeral stack, and the
+cost guard stops it (never deletes it) on a budget or session-limit breach.
 
 **Never provisioned, at all:**
 
 | Excluded | Why |
 |---|---|
 | NAT Gateway | ~$32/mo + data. Fargate runs in a public subnet with a public IP to reach ECR. |
-| RDS | Postgres runs as a container and is re-seeded each deploy |
+| RDS running between sessions, Multi-AZ, or anything above `db.t4g.small` | One single-AZ `db.t4g.micro` exists only while the stack does; its data is kept as a snapshot |
 | ElastiCache | Redis runs as a container |
 | EKS | ~$73/mo control plane alone. ECS Fargate tells the same story for free. |
 | EFS / persistent volumes | Data is ephemeral by design |
 | Idle compute or load balancers | Nothing survives `destroy.sh` |
 
-### Data is deliberately ephemeral
+### What persists, and what is deliberately ephemeral
 
-PostgreSQL, Qdrant, and Redis run as containers with no persistent volume. Their
-data is lost on destroy — **this is intended.** On AWS the API container itself
-rebuilds the demo dataset at every task start (`alembic upgrade head`, then
-`python -m seeds.seed`, through the real ingestion pipeline), so dashboards and
-retrieval are populated with genuine chunks, embeddings, and citations. A failed
-seed does not stop the API. `seed.sh` does the same for the local stack.
+| Data | On AWS | Survives task replacement? | Survives `destroy.sh`? |
+|---|---|---|---|
+| Relational data (tenants, users, documents, jobs, conversations, usage, audit) | **RDS PostgreSQL** | **Yes** | **Yes, through the snapshot `destroy.sh` takes and `deploy.sh` restores** |
+| Vectors (chunks + embeddings) | Qdrant container | No | No |
+| Cache, semantic cache, rate limits | Redis container | No | No |
+| Uploaded files | S3 (protected baseline) | Yes | Yes |
 
-Only the protected baseline persists: S3 documents, Secrets Manager, ECR images,
-Cognito, budgets and the audit log group.
+Qdrant and Redis run as containers with no persistent volume — **this is
+intended.** On AWS the API container migrates and re-seeds at every task start
+(`alembic upgrade head`, then `python -m seeds.seed`, through the real ingestion
+pipeline), so dashboards and retrieval are populated with genuine chunks,
+embeddings, and citations. `alembic upgrade head` is a no-op once the schema is
+current, and the seed upserts by stable IDs, so a persistent database is never
+duplicated. A failed seed does not stop the API. `seed.sh` does the same for the
+local stack.
+
+> **Known gap:** because Qdrant is still ephemeral while PostgreSQL is not, a
+> document uploaded on AWS keeps its row and its S3 file but loses its vectors at
+> the next task replacement, so it stops being retrievable until it is ingested
+> again. Only the seed documents are re-indexed automatically. A re-index job for
+> user documents is **not implemented**.
+
+Beyond the database, only the protected baseline persists: S3 documents, Secrets
+Manager, ECR images, Cognito, budgets and the audit log group.
 
 ### Enforcement
 
@@ -536,7 +560,7 @@ through Transcribe into the existing pipeline. Seeded demo data. Playwright E2E.
 
 ---
 
-### Phase 5 — AWS · the only phase that spends · ~$0.37 per session
+### Phase 5 — AWS · the only phase that spends · ~$0.44 per session
 Terraform for the ephemeral stack (ALB, ECS Fargate, ECR, S3, Cognito,
 CloudWatch, IAM, Budget). GitHub Actions with OIDC. CodeDeploy blue-green.
 CloudWatch metrics and alarms, LangSmith tracing. The lifecycle scripts fully

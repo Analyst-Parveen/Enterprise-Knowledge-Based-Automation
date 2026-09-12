@@ -23,6 +23,7 @@ NOW = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
 ACCOUNT = "123456789012"
 SERVICE_ARN = f"arn:aws:ecs:us-west-2:{ACCOUNT}:service/ekba-dev/ekba-dev"
 ALB_ARN = f"arn:aws:elasticloadbalancing:us-west-2:{ACCOUNT}:loadbalancer/app/ekba-dev-alb/abc123"
+DB_ARN = f"arn:aws:rds:us-west-2:{ACCOUNT}:db:ekba-dev-postgres"
 TRIGGER_TOPIC = f"arn:aws:sns:us-west-2:{ACCOUNT}:ekba-dev-cost-guard-trigger"
 OWNED_TAGS = {"ProjectCode": "ekba", "Environment": "dev", "Lifecycle": "ephemeral"}
 
@@ -49,6 +50,7 @@ def make_clients(
     state_arns: list[str] | None = None,
     created: datetime | None = None,
     desired: int = 1,
+    db_status: str = "available",
 ) -> handler.Clients:
     resources = (
         [(SERVICE_ARN, OWNED_TAGS), (ALB_ARN, OWNED_TAGS)] if resources is None else resources
@@ -86,7 +88,12 @@ def make_clients(
     elbv2 = MagicMock()
     elbv2.describe_load_balancers.return_value = {"LoadBalancers": [{"CreatedTime": created}]}
 
-    return handler.Clients(tagging=tagging, ecs=ecs, elbv2=elbv2, s3=s3, sns=MagicMock())
+    rds = MagicMock()
+    rds.describe_db_instances.return_value = {
+        "DBInstances": [{"DBInstanceStatus": db_status, "InstanceCreateTime": created}]
+    }
+
+    return handler.Clients(tagging=tagging, ecs=ecs, elbv2=elbv2, rds=rds, s3=s3, sns=MagicMock())
 
 
 def budget_event(topic: str = TRIGGER_TOPIC) -> dict[str, Any]:
@@ -107,6 +114,8 @@ def budget_event(topic: str = TRIGGER_TOPIC) -> dict[str, Any]:
 def assert_nothing_mutated(clients: handler.Clients) -> None:
     clients.ecs.update_service.assert_not_called()
     clients.elbv2.delete_load_balancer.assert_not_called()
+    clients.rds.stop_db_instance.assert_not_called()
+    clients.rds.delete_db_instance.assert_not_called()
 
 
 def published_message(clients: handler.Clients) -> str:
@@ -293,3 +302,97 @@ def test_session_check_with_nothing_running_is_quiet() -> None:
     result = handler.run({"trigger": "session-limit"}, make_cfg(), clients, NOW)
     assert result["status"] == "nothing-running"
     clients.sns.publish.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# RDS - stopped (never deleted), under the same ownership rules
+# ---------------------------------------------------------------------------
+ALL_OWNED = [(SERVICE_ARN, OWNED_TAGS), (ALB_ARN, OWNED_TAGS), (DB_ARN, OWNED_TAGS)]
+ALL_ARNS = [SERVICE_ARN, ALB_ARN, DB_ARN]
+
+
+def test_rds_arn_is_parsed_and_other_rds_types_are_not() -> None:
+    assert handler.parse_names(DB_ARN) == ("db-instance", ["ekba-dev-postgres"])
+    assert handler.parse_names(f"arn:aws:rds:us-west-2:{ACCOUNT}:cluster:ekba-dev-aurora") is None
+    assert (
+        handler.parse_names(f"arn:aws:rds:us-west-2:{ACCOUNT}:snapshot:ekba-dev-postgres-1") is None
+    )
+
+
+def test_dry_run_reports_it_would_stop_the_database_and_changes_nothing() -> None:
+    clients = make_clients(resources=ALL_OWNED, state_arns=ALL_ARNS)
+    result = handler.run(budget_event(), make_cfg(dry_run=True), clients, NOW)
+    assert result["status"] == "dry-run"
+    assert_nothing_mutated(clients)
+    assert "WOULD stop RDS instance ekba-dev-postgres" in published_message(clients)
+
+
+def test_live_shutdown_stops_the_database_last_and_never_deletes_it() -> None:
+    calls: list[str] = []
+    clients = make_clients(resources=ALL_OWNED, state_arns=ALL_ARNS)
+    clients.ecs.update_service.side_effect = lambda **_: calls.append("ecs")
+    clients.elbv2.delete_load_balancer.side_effect = lambda **_: calls.append("alb")
+    clients.rds.stop_db_instance.side_effect = lambda **_: calls.append("rds")
+
+    result = handler.run(budget_event(), make_cfg(), clients, NOW)
+
+    assert result["status"] == "shut-down"
+    assert calls == ["ecs", "alb", "rds"]
+    clients.rds.stop_db_instance.assert_called_once_with(DBInstanceIdentifier="ekba-dev-postgres")
+    clients.rds.delete_db_instance.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["stopped", "stopping", "deleting"])
+def test_database_that_is_not_running_is_left_alone(status: str) -> None:
+    clients = make_clients(resources=[(DB_ARN, OWNED_TAGS)], state_arns=[DB_ARN], db_status=status)
+    result = handler.run({"trigger": "manual"}, make_cfg(), clients, NOW)
+    assert result["actions"] == []
+    assert_nothing_mutated(clients)
+
+
+def test_database_missing_from_terraform_state_is_not_touched() -> None:
+    clients = make_clients(resources=[(DB_ARN, OWNED_TAGS)], state_arns=[])
+    result = handler.run(budget_event(), make_cfg(), clients, NOW)
+    assert_nothing_mutated(clients)
+    assert any(DB_ARN in r and "not in Terraform state" in r for r in result["refused"])
+
+
+@pytest.mark.parametrize(
+    "arn",
+    [
+        f"arn:aws:rds:us-west-2:{ACCOUNT}:db:ekba-devx-postgres",
+        f"arn:aws:rds:us-west-2:{ACCOUNT}:db:someone-elses-db",
+    ],
+)
+def test_database_without_project_name_prefix_is_not_touched(arn: str) -> None:
+    clients = make_clients(resources=[(arn, OWNED_TAGS)], state_arns=[arn])
+    result = handler.run(budget_event(), make_cfg(), clients, NOW)
+    assert_nothing_mutated(clients)
+    assert result["refused"] and "prefix" in result["refused"][0]
+
+
+def test_protected_database_is_not_touched() -> None:
+    tags = {**OWNED_TAGS, "Lifecycle": "protected"}
+    clients = make_clients(resources=[(DB_ARN, tags)], state_arns=[DB_ARN])
+    result = handler.run(budget_event(), make_cfg(), clients, NOW)
+    assert_nothing_mutated(clients)
+    assert result["refused"] and "tag" in result["refused"][0]
+
+
+def test_database_stop_failure_is_raised_after_the_other_shutdowns() -> None:
+    clients = make_clients(resources=ALL_OWNED, state_arns=ALL_ARNS)
+    clients.rds.stop_db_instance.side_effect = client_error("InvalidDBInstanceState")
+    with pytest.raises(RuntimeError, match="InvalidDBInstanceState"):
+        handler.run(budget_event(), make_cfg(), clients, NOW)
+    clients.ecs.update_service.assert_called_once()
+    clients.elbv2.delete_load_balancer.assert_called_once()
+
+
+def test_database_restarted_by_aws_after_seven_days_is_stopped_again() -> None:
+    # ECS at zero and the ALB already deleted - only the database runs again.
+    clients = make_clients(
+        resources=[(DB_ARN, OWNED_TAGS)], state_arns=[DB_ARN], created=NOW - timedelta(days=8)
+    )
+    result = handler.run({"trigger": "session-limit"}, make_cfg(), clients, NOW)
+    assert result["status"] == "shut-down"
+    clients.rds.stop_db_instance.assert_called_once_with(DBInstanceIdentifier="ekba-dev-postgres")

@@ -39,5 +39,5 @@ output "log_group" {
 
 output "hourly_cost_estimate_usd" {
   description = "Rough burn while this stack exists."
-  value       = "~0.072 (ALB ~0.023 + Fargate 1vCPU/3GB ~0.049)"
+  value       = "~0.09 (Fargate 1 vCPU/3 GB ~0.054, ALB ~0.023 + LCU, 3 public IPv4 ~0.015)"
 }

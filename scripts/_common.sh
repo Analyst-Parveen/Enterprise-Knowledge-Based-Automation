@@ -246,10 +246,44 @@ assert_within_budget() {
 # Print what is running billable right now, and the reminder to destroy.
 cost_reminder() {
   printf '\n%s---------------------------------------------------------------%s\n' "$C_YEL" "$C_RST"
-  printf '%s  Estimated burn: ~$0.09/hour  (Fargate + ALB + 3 public IPv4)%s\n' "$C_YEL" "$C_RST"
-  printf '%s  A 4-hour demo costs about $0.37. Auto-stop after 8h only once the cost guard is armed.%s\n' "$C_YEL" "$C_RST"
+  printf '%s  Estimated burn: ~$0.11/hour  (Fargate + ALB + 3 public IPv4 + RDS db.t4g.micro)%s\n' "$C_YEL" "$C_RST"
+  printf '%s  A 4-hour demo costs about $0.44. Auto-stop after 8h only once the cost guard is armed.%s\n' "$C_YEL" "$C_RST"
   printf '%s  RUN ./scripts/destroy.sh WHEN THE DEMO ENDS - idle time is wasted budget.%s\n' "$C_YEL" "$C_RST"
   printf '%s---------------------------------------------------------------%s\n\n' "$C_YEL" "$C_RST"
+}
+
+# ---------------------------------------------------------------------------
+# RDS. The instance belongs to the ephemeral stack; its DATA outlives a
+# destroy as a manual snapshot (destroy.sh takes it, deploy.sh restores it).
+# ---------------------------------------------------------------------------
+export DB_INSTANCE_ID="${PROJECT_CODE}-${ENVIRONMENT}-postgres"
+
+# db_instance_status - the instance status, or nothing when it does not exist.
+# Any other error is fatal: guessing "absent" could mean building an empty
+# database over data that is still there.
+db_instance_status() {
+  local out
+  if out="$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE_ID" \
+      --region "$AWS_REGION" --query 'DBInstances[0].DBInstanceStatus' --output text 2>&1)"; then
+    printf '%s' "$out" | tr -d '\r'
+  elif printf '%s' "$out" | grep -q "DBInstanceNotFound"; then
+    return 0
+  else
+    err "$out"
+    die "could not query RDS instance ${DB_INSTANCE_ID}"
+  fi
+}
+
+# latest_db_snapshot - newest AVAILABLE manual snapshot of the instance, or nothing.
+latest_db_snapshot() {
+  local id
+  id="$(aws rds describe-db-snapshots --db-instance-identifier "$DB_INSTANCE_ID" \
+      --snapshot-type manual --region "$AWS_REGION" \
+      --query 'reverse(sort_by(DBSnapshots[?Status==`available`], &SnapshotCreateTime))[0].DBSnapshotIdentifier' \
+      --output text)" || die "could not list snapshots of ${DB_INSTANCE_ID}"
+  id="$(printf '%s' "$id" | tr -d '\r')"
+  [ "$id" = "None" ] && id=""
+  printf '%s' "$id"
 }
 
 # ---------------------------------------------------------------------------

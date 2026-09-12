@@ -150,9 +150,27 @@ definition and service (`CODE_DEPLOY` deployment controller), the CodeDeploy
 application and deployment group, task IAM roles, a 1-day log group, and the
 `ekba-dev-5xx` / `ekba-dev-latency` alarms.
 
-One Fargate task (1 vCPU / 3 GB, x86_64) runs four containers: the API, Postgres,
-Qdrant and Redis. It has a public IP so it reaches ECR and Bedrock without a NAT
+One Fargate task (1 vCPU / 3 GB, x86_64) runs three containers: the API, Qdrant
+and Redis. It has a public IP so it reaches ECR and Bedrock without a NAT
 Gateway; its security group admits only the ALB.
+
+PostgreSQL is **Amazon RDS** (`modules/database`): `ekba-dev-postgres`,
+`db.t4g.micro`, single-AZ, 20 GB gp3, encrypted, in two private subnets with no
+internet route, `publicly_accessible = false`, and a security group that admits
+port 5432 from the task security group only. The master password is the
+`password` key of `ekba/dev/backend/database-url`, read through an **ephemeral**
+Secrets Manager resource into the **write-only** `password_wo` argument, so no
+password is ever written to state or to a plan. The API container assembles
+`DATABASE_URL` at startup from `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER` plus the
+injected `DB_PASSWORD`, and connects with `ssl=require`.
+
+Its data survives task replacement and every deploy. Between sessions it
+survives as a **manual snapshot**: `destroy.sh` takes one before destroying
+(and aborts if it cannot), and `deploy.sh` passes the newest one as
+`-var restore_snapshot_id=…` when the instance does not exist. The instance
+ignores later changes to that variable, so a newer snapshot never replaces a
+running database. Creating or restoring the instance adds ~10 minutes to a
+deploy.
 
 The ALB security group admits **only `allowed_cidrs`** (ports 80 and 443) — a
 single `/32` in `terraform.tfvars`. Port 8080 is open to no one. When the
@@ -160,10 +178,11 @@ operator's public IP changes, the app becomes unreachable from their machine
 and `verify.sh` fails, even though the ALB's own health checks pass. Update
 `allowed_cidrs` and redeploy (a one-resource, in-place change).
 
-Everything here is tagged `Lifecycle = "ephemeral"` and costs ~$0.09/hour while
-it exists (list-price estimate: Fargate, ALB, three public IPv4 addresses).
-`scripts/destroy.sh` targets this state only. The `hourly_cost_estimate_usd`
-output still says ~$0.072; it predates counting public IPv4 addresses.
+Everything here is tagged `Lifecycle = "ephemeral"` and costs ~$0.11/hour while
+it exists (list-price estimate: Fargate ~$0.054, ALB ~$0.023 + LCUs, three public
+IPv4 addresses ~$0.015, RDS ~$0.016 + ~$0.003 storage). Left running 24/7 the
+database alone would be ~$14/month, which is why nothing here is meant to
+outlive a session. `scripts/destroy.sh` targets this state only.
 
 The `estimated_charges` billing alarm in `modules/service` is created only when
 the region is `us-east-1` (billing metrics exist only there), so it does not

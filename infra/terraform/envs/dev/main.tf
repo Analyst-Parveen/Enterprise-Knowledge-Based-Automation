@@ -5,16 +5,23 @@
 # bucket, the Cognito pool and the budget live in envs/baseline and are
 # unreachable from here except as read-only data lookups.
 #
+# The RDS database lives here too, so it goes with the stack. Its data does
+# not: scripts/destroy.sh snapshots it first and deploy.sh restores the newest
+# snapshot (var.restore_snapshot_id).
+#
 # scripts/destroy.sh targets THIS state and only this state.
 ##############################################################################
 
 terraform {
-  required_version = ">= 1.9.0"
+  # 1.11+: write-only arguments (the RDS password never enters state).
+  required_version = ">= 1.11.0"
 
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.80"
+      source = "hashicorp/aws"
+      # 5.100 is the locked version; password_wo on aws_db_instance and the
+      # ephemeral Secrets Manager read both need a recent 5.x.
+      version = "~> 5.100"
     }
   }
 
@@ -78,6 +85,13 @@ data "aws_secretsmanager_secret" "app" {
   name = "${var.project_code}/${var.environment}/${each.value}"
 }
 
+# The database password, read at plan/apply time and never persisted: an
+# ephemeral resource is not written to state or to the saved plan. It is the
+# same "password" key the Postgres sidecar used, so no new secret is needed.
+ephemeral "aws_secretsmanager_secret_version" "database" {
+  secret_id = data.aws_secretsmanager_secret.app["backend/database-url"].id
+}
+
 ##############################################################################
 # Ephemeral infrastructure
 ##############################################################################
@@ -88,6 +102,21 @@ module "network" {
   vpc_cidr                  = var.vpc_cidr
   allowed_cidrs             = var.allowed_cidrs
   cloudfront_origin_ingress = var.cloudfront_origin_ingress
+}
+
+module "database" {
+  source = "../../modules/database"
+
+  name               = "${local.name}-postgres"
+  private_subnet_ids = module.network.private_subnet_ids
+  security_group_id  = module.network.db_security_group_id
+
+  instance_class        = var.db_instance_class
+  allocated_storage     = var.db_allocated_storage
+  backup_retention_days = var.db_backup_retention_days
+  restore_snapshot_id   = var.restore_snapshot_id
+
+  master_password = jsondecode(ephemeral.aws_secretsmanager_secret_version.database.secret_string)["password"]
 }
 
 module "service" {
@@ -111,16 +140,17 @@ module "service" {
   s3_bucket             = var.s3_bucket
   cognito_user_pool_arn = "arn:aws:cognito-idp:${var.aws_region}:${data.aws_caller_identity.current.account_id}:userpool/${tolist(data.aws_cognito_user_pools.main.ids)[0]}"
 
-  # ":password::" selects one key out of the JSON secret. Postgres wants only
-  # the password; the app wants the whole URL (below). Both come from the SAME
-  # secret, so they cannot drift apart the way two separate values would.
-  postgres_password_secret_arn = "${data.aws_secretsmanager_secret.app["backend/database-url"].arn}:password::"
-  secret_arns                  = [for s in data.aws_secretsmanager_secret.app : s.arn]
+  secret_arns = [for s in data.aws_secretsmanager_secret.app : s.arn]
+
+  database = {
+    host            = module.database.address
+    port            = module.database.port
+    name            = module.database.db_name
+    user            = module.database.username
+    password_secret = "${data.aws_secretsmanager_secret.app["backend/database-url"].arn}:password::"
+  }
 
   secret_environment = {
-    # The connection string carries a password, so it is a SECRET - it must
-    # never sit in environment_variables where it would land in Terraform state.
-    DATABASE_URL      = "${data.aws_secretsmanager_secret.app["backend/database-url"].arn}:url::"
     DEV_AUTH_SECRET   = data.aws_secretsmanager_secret.app["backend/dev-auth-secret"].arn
     QDRANT_API_KEY    = data.aws_secretsmanager_secret.app["backend/qdrant-api-key"].arn
     LANGSMITH_API_KEY = data.aws_secretsmanager_secret.app["ai/langsmith-api-key"].arn
@@ -133,10 +163,10 @@ module "service" {
     PROJECT_CODE = var.project_code
     LOG_LEVEL    = "INFO"
 
-    # Data services run as sidecars in the SAME ECS task, so they are reachable
-    # on localhost - no RDS, no ElastiCache, no service discovery needed.
-    # DATABASE_URL is injected from Secrets Manager instead (see below), because
-    # it embeds a password.
+    # Qdrant and Redis run as sidecars in the SAME ECS task, so they are
+    # reachable on localhost - no ElastiCache, no service discovery needed.
+    # PostgreSQL is RDS: DATABASE_URL is assembled in the container from the
+    # DB_* settings and the DB_PASSWORD secret (see module.service).
     QDRANT_URL = "http://localhost:6333"
     REDIS_URL  = "redis://localhost:6379/0"
 

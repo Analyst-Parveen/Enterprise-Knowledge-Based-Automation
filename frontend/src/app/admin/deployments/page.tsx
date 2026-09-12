@@ -51,7 +51,7 @@ function DeploymentsView() {
               }
             />
             <Stat label="Environment" value={health.data!.environment} />
-            <Stat label="Burn rate" value="~$0.072/hr" hint="ALB + one Fargate task" />
+            <Stat label="Burn rate" value="~$0.11/hr" hint="ALB + one Fargate task + RDS" />
           </>
         )}
       </section>
@@ -98,7 +98,7 @@ function DeploymentsView() {
                 ["scripts/verify.sh", "read-only health and AI pipeline check"],
                 ["scripts/test-e2e.sh", "full user journeys"],
                 ["scripts/rollback.sh", "shift traffic back to the last good revision"],
-                ["scripts/destroy.sh", "tear down the ephemeral stack"],
+                ["scripts/destroy.sh", "snapshot the database, then tear down the ephemeral stack"],
               ].map(([cmd, note]) => (
                 <li key={cmd} className="flex flex-wrap items-baseline gap-2">
                   <span className="text-accent">{cmd}</span>

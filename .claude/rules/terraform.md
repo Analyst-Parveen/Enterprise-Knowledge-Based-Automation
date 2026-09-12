@@ -114,16 +114,30 @@ Anything not in this project's state is out of scope for destroy, always.
 The Terraform must make overspending structurally difficult, not merely
 discouraged.
 
-- **No `aws_nat_gateway`, `aws_db_instance`, `aws_elasticache_*`, `aws_eks_*`, or
-  `aws_efs_*` resources exist anywhere in this codebase.** If one appears in a
-  plan, that is a bug — stop and remove it.
+- **No `aws_nat_gateway`, `aws_elasticache_*`, `aws_eks_*`, or `aws_efs_*`
+  resources exist anywhere in this codebase.** If one appears in a plan, that is
+  a bug — stop and remove it.
+- **Exactly one `aws_db_instance`** exists: `modules/database`, used by
+  `envs/dev` as `ekba-<env>-postgres` (approved 2026-09-11 to replace the
+  Postgres sidecar). It must stay: `db.t4g.micro` (the variable validation
+  allows `db.t4g.small` at most), single-AZ, 20 GB gp3, `publicly_accessible =
+  false`, private subnets, a security group that admits only the task security
+  group, storage encrypted, and a **write-only** master password
+  (`password_wo`) read ephemerally from Secrets Manager — never a password in
+  state. A second instance, Multi-AZ, a larger class or public access is a bug.
+- The database's data outlives `destroy.sh` only as a **manual snapshot**:
+  `destroy.sh` takes it before destroying and aborts if it cannot, and
+  `deploy.sh` passes the newest one as `restore_snapshot_id`. The instance
+  ignores later changes to that variable, so a new snapshot never replaces a
+  running database.
 - Fargate task runs in a **public subnet with `assign_public_ip = true`** so it
-  reaches ECR without a NAT Gateway.
-- Postgres, Qdrant, and Redis are **containers in the task definition**, not
-  managed services. No persistent volumes.
+  reaches ECR without a NAT Gateway. The private subnets have no internet route
+  and hold only RDS.
+- Qdrant and Redis are **containers in the task definition**, not managed
+  services. No persistent volumes.
 - Default sizing is the smallest that works: 1 vCPU / 3 GB (`task_memory =
-  3072`), because four containers share the task. A larger size needs an explicit
-  override with a comment justifying the cost.
+  3072`), because three containers share the task. A larger size needs an
+  explicit override with a comment justifying the cost.
 - `aws_budgets_budget` with a $20 limit and 50/80/100% alerts is part of the
   protected baseline. The cost-guard budgets exclude credits
   (`cost_types { include_credit = false }`) — a budget that includes credits

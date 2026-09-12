@@ -169,7 +169,8 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.9.8"
+          # 1.11+: envs/dev uses a write-only RDS password argument.
+          terraform_version: "1.15.8"
 
       - name: Format check
         run: terraform fmt -check -recursive infra/terraform
