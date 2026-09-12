@@ -6,6 +6,8 @@ import {
   Bot,
   Building2,
   ClipboardList,
+  Eye,
+  EyeOff,
   FileText,
   Gauge,
   KeyRound,
@@ -281,6 +283,7 @@ function SignIn() {
   const [busy, setBusy] = React.useState(false);
 
   const [token, setTokenValue] = React.useState("");
+  const [showPassword, setShowPassword] = React.useState(false);
 
   function fail(err: unknown) {
     setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
@@ -467,13 +470,25 @@ function SignIn() {
                   />
                   <Input
                     id="password"
-                    type="password"
+                    type={showPassword ? "text" : "password"}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     autoComplete="current-password"
-                    className="pl-9"
+                    className="pl-9 pr-10"
                     required
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((open) => !open)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-muted hover:text-fg"
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                  >
+                    {showPassword ? (
+                      <EyeOff aria-hidden className="h-4 w-4" />
+                    ) : (
+                      <Eye aria-hidden className="h-4 w-4" />
+                    )}
+                  </button>
                 </div>
               </div>
               {error ? <FormError message={error} /> : null}

@@ -7,6 +7,7 @@ import {
   Bot,
   Building2,
   CheckCircle2,
+  ClipboardList,
   Clock,
   Coins,
   Database,
@@ -20,6 +21,7 @@ import {
   Table2,
   Timer,
   Upload,
+  UserPlus,
   Video,
   Zap,
   type LucideIcon,
@@ -46,7 +48,7 @@ import {
 } from "@/components/ui";
 import { useAsync } from "@/hooks/useAsync";
 import { api } from "@/lib/api";
-import { DEPARTMENTS, type DocumentOut, type Modality } from "@/types/api";
+import { DEPARTMENTS, type AuditEvent, type DocumentOut, type Modality } from "@/types/api";
 
 // The API caps a page at 200. Breakdowns below are computed over that page and
 // say so when the tenant holds more - no number on this page is invented.
@@ -93,6 +95,218 @@ function summarise(items: DocumentOut[]) {
 }
 
 export default function DashboardPage() {
+  const { me } = useSession();
+  if (me?.role === "platform_admin") {
+    return <PlatformHome />;
+  }
+  return <TenantHome />;
+}
+
+/**
+ * The service provider's landing page.
+ *
+ * A platform operator must never land on the knowledge dashboard: the platform
+ * tenant holds no documents, and onboarding a company does not grant access to
+ * its content. This view is registry and trail only.
+ */
+function PlatformHome() {
+  const { me } = useSession();
+  const tenants = useAsync(() => api.platform.tenants(), []);
+  const trail = useAsync(() => api.platform.audit(8), []);
+
+  const items = tenants.data?.items ?? [];
+  const unfinished = items.filter((t) => t.admin_count === 0);
+  const seats = items.reduce((sum, t) => sum + t.user_count, 0);
+  const recent = trail.data ?? [];
+
+  return (
+    <div className="space-y-6">
+      <section className="relative overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
+        <div aria-hidden className="absolute inset-x-0 top-0 h-1 bg-brand" />
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -right-20 -top-24 h-72 w-72 rounded-full bg-accent2/15 blur-3xl"
+        />
+        <div className="relative grid gap-6 p-6 lg:grid-cols-[1fr_auto] lg:items-center lg:p-8">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone="violet" dot>
+                tenant <span className="font-mono">{me?.tenant_id}</span>
+              </Badge>
+              <Badge tone="violet">{me?.role}</Badge>
+            </div>
+            <p className="mt-4 text-sm font-medium text-muted">
+              Welcome back, {greetingName(me?.email, me?.user_id)}
+            </p>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight text-fg sm:text-3xl">
+              Control plane
+            </h1>
+            <p className="mt-2 max-w-xl text-sm text-muted">
+              Onboard a company, invite the administrator who will run it, and watch the
+              seats fill up. Creating a company here never grants access to its documents.
+            </p>
+            <div className="mt-5 flex flex-wrap gap-2">
+              <Link href="/platform/tenants">
+                <Button size="lg">
+                  <Building2 aria-hidden className="h-4 w-4" />
+                  Onboard a company
+                </Button>
+              </Link>
+              <Link href="/platform/audit">
+                <Button size="lg" variant="secondary">
+                  <ClipboardList aria-hidden className="h-4 w-4" />
+                  View onboarding trail
+                </Button>
+              </Link>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-5 rounded-xl border border-border bg-surface-2 p-4 sm:min-w-[18rem]">
+            <dl className="w-full space-y-3 text-sm">
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-xs text-muted">Companies</dt>
+                <dd className="font-semibold tabular-nums text-fg">
+                  {tenants.loading ? "—" : items.length}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-xs text-muted">Awaiting an admin</dt>
+                <dd
+                  className={cn(
+                    "font-semibold tabular-nums",
+                    unfinished.length ? "text-warn" : "text-ok",
+                  )}
+                >
+                  {tenants.loading ? "—" : unfinished.length}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-xs text-muted">Seats provisioned</dt>
+                <dd className="font-semibold tabular-nums text-fg">
+                  {tenants.loading ? "—" : seats}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section aria-label="Portfolio" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {tenants.loading ? (
+          Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[108px]" />)
+        ) : tenants.error ? (
+          <div className="sm:col-span-2 xl:col-span-4">
+            <ErrorState message={tenants.error} onRetry={tenants.reload} />
+          </div>
+        ) : (
+          <>
+            <Stat label="Companies" value={items.length} icon={Building2} iconTone="accent" />
+            <Stat
+              label="Active"
+              value={items.filter((t) => t.is_active).length}
+              icon={CheckCircle2}
+              iconTone="ok"
+            />
+            <Stat
+              label="Awaiting an admin"
+              value={unfinished.length}
+              hint={unfinished.length ? "nobody can sign in until you invite one" : "every company has an administrator"}
+              icon={UserPlus}
+              iconTone={unfinished.length ? "warn" : "accent"}
+              tone={unfinished.length ? "warn" : undefined}
+            />
+            <Stat label="Seats provisioned" value={seats} icon={ShieldCheck} iconTone="violet" />
+          </>
+        )}
+      </section>
+
+      {unfinished.length > 0 ? (
+        <Card className="border-warn/40 bg-warn/5">
+          <CardBody className="flex flex-wrap items-center gap-3 text-sm">
+            <UserPlus aria-hidden className="h-4 w-4 shrink-0 text-warn" />
+            <span className="text-fg">
+              {unfinished.length === 1
+                ? `${unfinished[0].name} has no administrator yet.`
+                : `${unfinished.length} companies have no administrator yet.`}
+            </span>
+            <Link href="/platform/tenants" className="ml-auto">
+              <Button size="sm" variant="secondary">
+                Invite an admin
+                <ArrowRight aria-hidden className="h-3.5 w-3.5" />
+              </Button>
+            </Link>
+          </CardBody>
+        </Card>
+      ) : null}
+
+      <Card>
+        <CardHeader className="flex items-center justify-between">
+          <CardTitle>
+            <ClipboardList aria-hidden className="h-4 w-4 text-accent" />
+            Recent onboarding
+          </CardTitle>
+          <Link
+            href="/platform/audit"
+            className="inline-flex items-center gap-1 text-xs font-medium text-accent transition-colors hover:text-accent2"
+          >
+            Full trail
+            <ArrowRight aria-hidden className="h-3.5 w-3.5" />
+          </Link>
+        </CardHeader>
+        {trail.loading ? (
+          <CardBody className="space-y-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-10" />
+            ))}
+          </CardBody>
+        ) : trail.error ? (
+          <CardBody>
+            <ErrorState message={trail.error} onRetry={trail.reload} />
+          </CardBody>
+        ) : recent.length === 0 ? (
+          <EmptyState
+            icon={Building2}
+            title="No companies yet"
+            hint="Onboard the first one. You will be asked for its name, then for the administrator who should run it."
+            action={
+              <Link href="/platform/tenants">
+                <Button size="sm" className="mt-2">
+                  Onboard a company
+                </Button>
+              </Link>
+            }
+          />
+        ) : (
+          <ul className="divide-y divide-border">
+            {recent.map((event: AuditEvent) => (
+              <li key={event.id} className="flex items-center gap-3 px-5 py-3">
+                <span className="min-w-0 flex-1">
+                  <p className="truncate font-mono text-xs text-fg">{event.event_type}</p>
+                  <p className="truncate text-xs text-muted">{event.reason ?? "—"}</p>
+                </span>
+                <Badge tone={statusTone(event.severity)}>{event.severity}</Badge>
+                <span className="whitespace-nowrap text-xs text-muted">
+                  {new Date(event.created_at).toLocaleString()}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+
+      <p className="flex items-start gap-2 rounded-xl border border-dashed border-border px-4 py-3 text-xs leading-relaxed text-muted">
+        <ShieldCheck aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+        <span>
+          Isolation holds here too. This page lists company names, seat counts and lifecycle
+          events. A company&apos;s documents, conversations and metrics are not reachable from
+          the platform role at all.
+        </span>
+      </p>
+    </div>
+  );
+}
+
+function TenantHome() {
   const { me } = useSession();
   const isAdmin = me?.role === "admin";
 

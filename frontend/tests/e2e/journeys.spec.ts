@@ -27,7 +27,7 @@ async function signIn(page: Page, token: string) {
   await page.getByText("Developer sign-in").click();
   await page.getByLabel("Access token").fill(token);
   await page.getByRole("button", { name: "Use token" }).click();
-  await expect(page.getByRole("heading", { name: "Enterprise Knowledge AI" })).toBeVisible({
+  await expect(page.getByRole("button", { name: /sign out/i })).toBeVisible({
     timeout: 15_000,
   });
 }
@@ -234,6 +234,12 @@ test.describe("platform journeys", () => {
 
   test.beforeEach(async ({ page }) => {
     await signIn(page, PLATFORM_TOKEN);
+  });
+
+  test("the platform operator lands on the control plane", async ({ page }) => {
+    await expect(page.getByRole("heading", { name: "Control plane" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Onboard a company" }).first()).toBeVisible();
+    await expect(page.getByText(/never grants access to its documents/i)).toBeVisible();
   });
 
   test("the platform operator sees the company registry", async ({ page }) => {
