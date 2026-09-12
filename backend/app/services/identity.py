@@ -167,7 +167,15 @@ def _translate(exc: Exception) -> Exception:
     if code == "InvalidParameterException":
         return ValidationError("The request was rejected by the identity provider.")
 
-    logger.error("cognito_call_failed", extra={"extra": {"error_code": code or "unknown"}})
+    logger.error(
+        "cognito_call_failed",
+        extra={
+            "extra": {
+                "error_code": code or "unknown",
+                "exc_type": type(exc).__name__,
+            }
+        },
+    )
     return UpstreamError("The identity provider is unavailable.")
 
 

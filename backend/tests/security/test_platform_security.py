@@ -183,6 +183,41 @@ class TestSecurityHeaders:
         assert "*" not in settings.cors_origins
 
 
+class TestCognitoErrorsDoNotLeak:
+    def test_access_denied_is_reported_as_unavailable(self) -> None:
+        from app.core.exceptions import UpstreamError
+        from app.services.identity import _translate
+
+        class _DeniedError(Exception):
+            response = {"Error": {"Code": "AccessDeniedException"}}
+
+        err = _translate(_DeniedError())
+        assert isinstance(err, UpstreamError)
+        assert "denied" not in err.message.lower()
+        assert "unavailable" in err.message.lower()
+
+
+class TestCognitoTaskRoleStaysLeastPrivilege:
+    """The task may sign in and invite; it must never choose a password."""
+
+    def test_sign_in_and_invite_are_granted_and_password_set_is_not(self) -> None:
+        from pathlib import Path
+
+        policy = (
+            Path(__file__).resolve().parents[3]
+            / "infra"
+            / "terraform"
+            / "modules"
+            / "service"
+            / "main.tf"
+        ).read_text(encoding="utf-8")
+        assert "cognito-idp:InitiateAuth" in policy
+        assert "cognito-idp:RespondToAuthChallenge" in policy
+        assert "cognito-idp:AdminCreateUser" in policy
+        assert "cognito-idp:AdminSetUserPassword" not in policy
+        assert "cognito-idp:AdminDeleteUser" not in policy
+
+
 class TestRateLimitConfig:
     def test_limits_match_project_spec(self) -> None:
         """PROJECT.md section 9: 20 / 10 / 5 per minute per user."""

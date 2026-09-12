@@ -211,6 +211,24 @@ resource "aws_iam_role_policy" "task" {
         Resource = var.cognito_user_pool_arn
       },
       {
+        # Sign-in, first-password and forgot-password. These Cognito APIs are
+        # "public" in the product sense (the browser never talks to Cognito;
+        # this API does), but boto3 still signs every call with the task role.
+        # Without these actions a correct email/password is rejected as
+        # AccessDenied and the user only sees "identity provider is unavailable".
+        #
+        # Pinned to this pool. Still no AdminSetUserPassword / AdminDeleteUser.
+        Sid    = "SignInOnOwnPool"
+        Effect = "Allow"
+        Action = [
+          "cognito-idp:InitiateAuth",
+          "cognito-idp:RespondToAuthChallenge",
+          "cognito-idp:ForgotPassword",
+          "cognito-idp:ConfirmForgotPassword",
+        ]
+        Resource = var.cognito_user_pool_arn
+      },
+      {
         # Tenant onboarding: a platform operator invites a company's first
         # admin, and a company admin invites its own users. The API performs
         # these as admin calls against THIS pool only - the resource is pinned
