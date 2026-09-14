@@ -80,6 +80,8 @@ data "aws_secretsmanager_secret" "app" {
     "backend/qdrant-api-key",
     "backend/dev-auth-secret",
     "ai/langsmith-api-key",
+    "ai/cohere-api-key",
+    "ai/groq-api-key",
   ])
 
   name = "${var.project_code}/${var.environment}/${each.value}"
@@ -154,6 +156,8 @@ module "service" {
     DEV_AUTH_SECRET   = data.aws_secretsmanager_secret.app["backend/dev-auth-secret"].arn
     QDRANT_API_KEY    = data.aws_secretsmanager_secret.app["backend/qdrant-api-key"].arn
     LANGSMITH_API_KEY = data.aws_secretsmanager_secret.app["ai/langsmith-api-key"].arn
+    COHERE_API_KEY    = data.aws_secretsmanager_secret.app["ai/cohere-api-key"].arn
+    GROQ_API_KEY      = data.aws_secretsmanager_secret.app["ai/groq-api-key"].arn
   }
 
   # Non-secret configuration only. Anything sensitive goes through
@@ -163,12 +167,12 @@ module "service" {
     PROJECT_CODE = var.project_code
     LOG_LEVEL    = "INFO"
 
-    # Qdrant and Redis run as sidecars in the SAME ECS task, so they are
-    # reachable on localhost - no ElastiCache, no service discovery needed.
+    # Qdrant Cloud (external). Redis remains a localhost sidecar.
     # PostgreSQL is RDS: DATABASE_URL is assembled in the container from the
     # DB_* settings and the DB_PASSWORD secret (see module.service).
-    QDRANT_URL = "http://localhost:6333"
-    REDIS_URL  = "redis://localhost:6379/0"
+    QDRANT_URL        = "https://ae78fba4-cccf-4341-be61-4171c4aa6e2b.us-west-2-0.aws.cloud.qdrant.io"
+    QDRANT_COLLECTION = "ekba_chunks"
+    REDIS_URL         = "redis://localhost:6379/0"
 
     S3_BUCKET  = var.s3_bucket
     AWS_REGION = var.aws_region
@@ -177,8 +181,12 @@ module "service" {
     COGNITO_CLIENT_ID    = var.cognito_client_id
     COGNITO_REGION       = var.aws_region
 
-    # Bedrock only - both chat and embeddings.
-    AI_PROVIDER                    = "bedrock"
+    # Live chat/embed: Groq + Cohere (Bedrock remains selectable via LLM_PROVIDER).
+    AI_PROVIDER                    = "hybrid"
+    EMBED_PROVIDER                 = "cohere"
+    LLM_PROVIDER                   = "groq"
+    LLM_MODEL                      = "openai/gpt-oss-20b"
+    COHERE_EMBED_MODEL             = "embed-multilingual-v3.0"
     BEDROCK_REGION                 = var.bedrock_region
     BEDROCK_CHAT_PRIMARY_MODEL_ID  = var.bedrock_chat_primary_model_id
     BEDROCK_CHAT_FALLBACK_MODEL_ID = var.bedrock_chat_fallback_model_id

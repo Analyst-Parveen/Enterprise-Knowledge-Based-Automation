@@ -279,6 +279,8 @@ locals {
     "backend/qdrant-api-key",
     "backend/dev-auth-secret",
     "ai/langsmith-api-key",
+    "ai/cohere-api-key",
+    "ai/groq-api-key",
   ]
 }
 

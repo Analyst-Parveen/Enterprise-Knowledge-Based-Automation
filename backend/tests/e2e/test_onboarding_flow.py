@@ -227,6 +227,11 @@ async def test_two_companies_are_onboarded_and_stay_apart(api: httpx.AsyncClient
     assert signin.json()["user"]["role"] == "admin"
     assert DEV_PASSWORD not in signin.text
 
+    session_headers = auth(signin.json()["token"])
+    listed = (await api.get("/api/v1/admin/users", headers=session_headers)).json()
+    admin_row = next(u for u in listed["items"] if u["email"] == f"admin@{INFINITY}.example")
+    assert admin_row["last_login_at"] is not None, "successful sign-in must stamp last_login_at"
+
     wrong = await api.post(
         "/api/v1/auth/login",
         json={"email": f"admin@{INFINITY}.example", "password": "WrongPassword!99"},

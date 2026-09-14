@@ -107,7 +107,7 @@ async def ensure_collection() -> None:
     The tenant_id index is not optional - it is what makes the mandatory filter
     fast enough that nobody is ever tempted to drop it.
     """
-    dim = settings.bedrock_embedding_dimension
+    dim = settings.embedding_dimension
     name = settings.qdrant_collection
 
     def _ensure() -> None:
@@ -134,6 +134,8 @@ async def ensure_collection() -> None:
             ("document_id", qm.PayloadSchemaType.KEYWORD),
             ("owner_id", qm.PayloadSchemaType.KEYWORD),
             ("department", qm.PayloadSchemaType.KEYWORD),
+            # Qdrant Cloud requires an index for filtered bool fields.
+            ("suspicious", qm.PayloadSchemaType.BOOL),
         ):
             try:
                 client.create_payload_index(

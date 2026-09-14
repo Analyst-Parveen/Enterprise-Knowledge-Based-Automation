@@ -315,6 +315,23 @@ async def get_user_by_sub(session: AsyncSession, cognito_sub: str) -> User | Non
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def mark_login(session: AsyncSession, *, subject: str) -> None:
+    """Stamp last_login_at for a successful sign-in.
+
+    Looked up by Cognito subject or local user id — never by a client-supplied
+    tenant. Best-effort: a missing row or a test stub without ``execute`` must
+    never fail the sign-in itself.
+    """
+    execute = getattr(session, "execute", None)
+    if not callable(execute):
+        return
+    await execute(
+        update(User)
+        .where((User.cognito_sub == subject) | (User.id == subject))
+        .values(last_login_at=datetime.now(UTC))
+    )
+
+
 async def get_own_tenant(session: AsyncSession, ctx: RequestContext) -> Tenant:
     """The caller's own company. There is no parameter for anyone else's."""
     tenant = (

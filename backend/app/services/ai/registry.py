@@ -58,6 +58,9 @@ _PRICING: dict[str, tuple[float, float]] = {
     "amazon.nova-premier-v1:0": (2.50, 12.50),
     "amazon.titan-embed-text-v2:0": (0.02, 0.0),
     "cohere.embed-v4:0": (0.12, 0.0),
+    "embed-multilingual-v3.0": (0.10, 0.0),
+    "llama-3.3-70b-versatile": (0.59, 0.79),
+    "openai/gpt-oss-20b": (0.10, 0.50),
     "openai.gpt-oss-20b-1:0": (0.07, 0.30),
     "openai.gpt-oss-120b-1:0": (0.15, 0.60),
 }
@@ -91,12 +94,23 @@ def _supports_vision(model_id: str) -> bool:
 
 def resolve(role: ModelRole) -> ModelSpec:
     """Return the concrete model configured for a logical role."""
-    model_id = {
-        ModelRole.CHAT_PRIMARY: settings.bedrock_chat_primary_model_id,
-        ModelRole.CHAT_FALLBACK: settings.bedrock_chat_fallback_model_id,
-        ModelRole.VISION: settings.bedrock_vision_model_id,
-        ModelRole.EMBEDDING: settings.bedrock_embedding_model_id,
-    }[role]
+    if role is ModelRole.CHAT_PRIMARY:
+        if settings.llm_provider == "groq":
+            model_id = settings.effective_chat_model_id
+        elif settings.llm_provider == "bedrock" and settings.llm_model:
+            model_id = settings.llm_model
+        else:
+            model_id = settings.bedrock_chat_primary_model_id
+    elif role is ModelRole.CHAT_FALLBACK:
+        model_id = settings.bedrock_chat_fallback_model_id
+    elif role is ModelRole.VISION:
+        model_id = settings.bedrock_vision_model_id
+    else:
+        model_id = (
+            settings.cohere_embed_model
+            if settings.embed_provider == "cohere"
+            else settings.bedrock_embedding_model_id
+        )
 
     in_cost, out_cost = _pricing(model_id)
     return ModelSpec(
@@ -105,7 +119,7 @@ def resolve(role: ModelRole) -> ModelSpec:
         supports_vision=_supports_vision(model_id),
         input_cost_per_1m=in_cost,
         output_cost_per_1m=out_cost,
-        dimension=settings.bedrock_embedding_dimension if role is ModelRole.EMBEDDING else None,
+        dimension=settings.embedding_dimension if role is ModelRole.EMBEDDING else None,
     )
 
 

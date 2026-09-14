@@ -62,6 +62,9 @@ set_if_empty "backend/dev-auth-secret"  "$(rand_hex 32)"   # unused on AWS: DEV_
 # ECS refuses to start a task whose secret has no value, so this needs one even
 # while LangSmith tracing is off. Replace it with a real key if you enable tracing.
 set_if_empty "ai/langsmith-api-key"     "not-configured"
+# Placeholders only - real Cohere/Groq values are set out-of-band for live demos.
+set_if_empty "ai/cohere-api-key"        "not-configured"
+set_if_empty "ai/groq-api-key"          "not-configured"
 
 REPORT="$(report_path set-secrets)"
 report_header "$REPORT" "Secrets Setup"

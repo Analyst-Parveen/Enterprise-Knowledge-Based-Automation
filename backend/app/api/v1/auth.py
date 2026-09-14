@@ -68,6 +68,7 @@ async def login(payload: LoginRequest, session: DbSession) -> SessionResponse:
     if isinstance(outcome, IssuedSession):
         response = _describe(outcome)
         if response.user:
+            await repo.mark_login(session, subject=response.user.user_id)
             await repo.record_audit(
                 session,
                 event_type="auth.login_succeeded",
@@ -97,6 +98,7 @@ async def complete_new_password(payload: NewPasswordRequest, session: DbSession)
     if isinstance(outcome, IssuedSession):
         response = _describe(outcome)
         if response.user:
+            await repo.mark_login(session, subject=response.user.user_id)
             await repo.record_audit(
                 session,
                 event_type="auth.first_sign_in_completed",

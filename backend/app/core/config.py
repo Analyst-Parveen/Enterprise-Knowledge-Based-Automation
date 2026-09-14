@@ -15,7 +15,11 @@ from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["dev", "test", "staging", "prod"]
-AIProvider = Literal["bedrock", "local"]
+# AI_PROVIDER=local is the $0 offline stub. Anything else uses real backends
+# selected by EMBED_PROVIDER / LLM_PROVIDER.
+AIProvider = Literal["bedrock", "local", "hybrid"]
+EmbedProvider = Literal["cohere", "bedrock", "local"]
+LLMProvider = Literal["groq", "bedrock", "local"]
 
 # app/core/config.py -> core -> app -> backend -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -69,8 +73,16 @@ class Settings(BaseSettings):
     dev_auth_password: SecretStr = SecretStr("LocalDev!2026")
     dev_auth_token_ttl_seconds: int = 3600
 
-    # -- AI: Amazon Bedrock ----------------------------------------------
+    # -- AI ----------------------------------------------------------------
+    # AI_PROVIDER=local keeps the $0 stub for tests. For real backends use
+    # hybrid (or bedrock) and select chat/embed via LLM_PROVIDER / EMBED_PROVIDER.
     ai_provider: AIProvider = "bedrock"
+    embed_provider: EmbedProvider = "cohere"
+    llm_provider: LLMProvider = "groq"
+    # Concrete chat model id for the selected LLM_PROVIDER (Groq model name or
+    # Bedrock model / inference-profile id). Swapping models is config-only.
+    llm_model: str = "openai/gpt-oss-20b"
+
     aws_region: str = "us-west-2"
     bedrock_region: str = "us-west-2"
     transcribe_region: str = "us-west-2"
@@ -79,7 +91,14 @@ class Settings(BaseSettings):
     bedrock_chat_fallback_model_id: str = "us.amazon.nova-micro-v1:0"
     bedrock_vision_model_id: str = "us.amazon.nova-lite-v1:0"
     bedrock_embedding_model_id: str = "amazon.titan-embed-text-v2:0"
+    # Kept for backwards compatibility; also the collection dimension.
     bedrock_embedding_dimension: int = 1024
+
+    cohere_api_key: SecretStr | None = None
+    cohere_embed_model: str = "embed-multilingual-v3.0"
+
+    groq_api_key: SecretStr | None = None
+    groq_api_base: str = "https://api.groq.com/openai/v1"
 
     # -- RAG / guardrail tuning ------------------------------------------
     retrieval_top_k: int = 8
@@ -168,6 +187,20 @@ class Settings(BaseSettings):
     @property
     def trusted_host_list(self) -> list[str]:
         return [h.strip() for h in self.trusted_hosts.split(",") if h.strip()]
+
+    @property
+    def embedding_dimension(self) -> int:
+        """Vector size for the active embedding model / Qdrant collection."""
+        return self.bedrock_embedding_dimension
+
+    @property
+    def effective_chat_model_id(self) -> str:
+        """Chat model for the configured LLM_PROVIDER without RAG code changes."""
+        if self.llm_provider == "bedrock":
+            return self.llm_model or self.bedrock_chat_primary_model_id
+        if self.llm_provider == "groq":
+            return self.llm_model
+        return "local-dev-stub"
 
     @property
     def is_dev(self) -> bool:
