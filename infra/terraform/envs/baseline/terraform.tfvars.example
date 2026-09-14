@@ -8,6 +8,9 @@ budget_limit_usd   = 20
 budget_alert_email = "you@example.com"
 
 github_repository = "your-github-user/Enter-Prise-Knowledge-Based-Automation"
+# Numeric owner_id/repo_id: GitHub's OIDC subject is repo:owner@<id>/repo@<id>:...
+# Read them from https://api.github.com/repos/<owner>/<repo> (owner.id, id).
+# github_repository_ids = "12345678/987654321"
 create_github_oidc = true   # set false if the OIDC provider already exists
 
 # Bootstrap these two manually before the first apply.

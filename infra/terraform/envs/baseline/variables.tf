@@ -63,6 +63,17 @@ variable "github_repository" {
   }
 }
 
+variable "github_repository_ids" {
+  description = "Numeric \"<owner_id>/<repo_id>\" of github_repository. GitHub's ID-based OIDC subject (repo:owner@id/repo@id:...) needs them; null trusts only the name-based subject."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.github_repository_ids == null || can(regex("^[0-9]+/[0-9]+$", var.github_repository_ids))
+    error_message = "Must be in the form <owner_id>/<repo_id>, both numeric."
+  }
+}
+
 variable "create_github_oidc" {
   description = "Create the GitHub OIDC provider. Set false if one already exists in the account."
   type        = bool

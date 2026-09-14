@@ -359,6 +359,16 @@ resource "aws_iam_openid_connect_provider" "github" {
 
 locals {
   github_oidc_arn = var.create_github_oidc ? aws_iam_openid_connect_provider.github[0].arn : data.aws_iam_openid_connect_provider.github[0].arn
+
+  # GitHub now issues subjects that pin owner and repo by numeric ID
+  # (repo:owner@<owner_id>/repo@<repo_id>:...). Trust both forms of THIS repo.
+  github_repo_parts = split("/", var.github_repository)
+  github_subjects = concat(
+    ["repo:${var.github_repository}:*"],
+    var.github_repository_ids == null ? [] : [format("repo:%s@%s/%s@%s:*",
+      local.github_repo_parts[0], split("/", var.github_repository_ids)[0],
+    local.github_repo_parts[1], split("/", var.github_repository_ids)[1])],
+  )
 }
 
 resource "aws_iam_role" "github_deploy" {
@@ -374,7 +384,7 @@ resource "aws_iam_role" "github_deploy" {
         StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
         # Scoped to THIS repository. Any other repo assuming this role is denied.
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:*"
+          "token.actions.githubusercontent.com:sub" = local.github_subjects
         }
       }
     }]
