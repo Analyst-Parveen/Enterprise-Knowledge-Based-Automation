@@ -171,21 +171,52 @@ jobs:
           TAG: ${{ github.sha }}
         run: |
           REPO="$PROJECT_CODE-$ENVIRONMENT-backend"
-          aws ecr wait image-scan-complete --repository-name "$REPO" --image-id imageTag="$TAG" || true
-          # An unfinished or failed scan is not a clean scan.
-          STATUS=$(aws ecr describe-image-scan-findings \
-            --repository-name "$REPO" --image-id imageTag="$TAG" \
-            --query 'imageScanStatus.status' --output text 2>/dev/null || echo UNKNOWN)
-          if [ "$STATUS" != "COMPLETE" ]; then
-            echo "::error::ECR scan status is $STATUS, not COMPLETE. Not deploying."
+          # Gate the exact image: resolve the SHA tag to its digest, whether it
+          # was just pushed or reused.
+          DIGEST=$(aws ecr describe-images --repository-name "$REPO" \
+            --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text)
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
+            echo "::error::no digest for $REPO:$TAG. Not deploying."
             exit 1
           fi
-          CRITICAL=$(aws ecr describe-image-scan-findings \
-            --repository-name "$REPO" --image-id imageTag="$TAG" \
-            --query 'imageScanFindings.findingSeverityCounts.CRITICAL' --output text)
+          echo "image digest: $DIGEST"
+
+          # Scan on push runs asynchronously and takes a few minutes; until it
+          # finishes the scan may not exist yet. Keep asking - never treat a
+          # missing or unfinished scan as clean. (This role cannot start scans.)
+          STATUS=NOT_FOUND
+          for _ in $(seq 1 60); do
+            if OUT=$(aws ecr describe-image-scan-findings --repository-name "$REPO" \
+                  --image-id imageDigest="$DIGEST" \
+                  --query '[imageScanStatus.status, imageScanFindings.findingSeverityCounts.CRITICAL]' \
+                  --output text 2>&1); then
+              read -r STATUS CRITICAL <<< "$OUT"
+            elif echo "$OUT" | grep -q ScanNotFoundException; then
+              STATUS=NOT_FOUND
+            else
+              echo "::error::could not read scan findings: $OUT"
+              exit 1
+            fi
+            case "$STATUS" in
+              COMPLETE) break ;;
+              FAILED|UNSUPPORTED_IMAGE|SCAN_ELIGIBILITY_EXPIRED|FINDINGS_UNAVAILABLE)
+                echo "::error::ECR scan status is $STATUS for $DIGEST. Not deploying."
+                exit 1 ;;
+            esac
+            echo "scan status: $STATUS - waiting"
+            sleep 10
+          done
+          if [ "$STATUS" != "COMPLETE" ]; then
+            echo "::error::ECR scan of $DIGEST not COMPLETE after 10 minutes (last: $STATUS). Not deploying."
+            exit 1
+          fi
+
           echo "critical findings: $CRITICAL"
           if [ "$CRITICAL" != "None" ] && [ "$CRITICAL" != "0" ]; then
-            echo "::error::$CRITICAL critical findings. Not deploying."
+            aws ecr describe-image-scan-findings --repository-name "$REPO" --image-id imageDigest="$DIGEST" \
+              --query 'imageScanFindings.findings[?severity==`CRITICAL`].[name, attributes[?key==`package_name`].value | [0], attributes[?key==`package_version`].value | [0]]' \
+              --output text
+            echo "::error::$CRITICAL critical findings in $DIGEST. Not deploying."
             exit 1
           fi
 
