@@ -55,7 +55,7 @@ Parveen, ye handbook tumhare **apne repository** ko padh kar likhi gayi hai — 
 | Roles | **Teen**: `user`, `admin`, `platform_admin` (Chapter 2.2) |
 | Tenant onboarding | **Implemented** — platform operator company banata hai aur uska pehla admin invite karta hai; wo admin apne users banata hai (Chapter 7) |
 | Login | **Email + password** (Cognito), pehli baar password set karna, forgot-password, silent refresh, server-side logout. Token paste karna sirf local debugging ke liye bacha hai (Chapter 6) |
-| Tests | 280 backend (deploy gate 279) + 29 Playwright journeys |
+| Tests | 280 backend (deploy gate 279) + 30 Playwright journeys |
 
 <div class="callout warn" markdown="1">
 Ye URLs secret nahi hain, lekin ye state badal sakti hai. `destroy.sh` ke baad backend ALB ka naam badal jata hai; CloudFront aur Amplify URL same rehte hain (Chapter 22).
@@ -354,7 +354,7 @@ Har file ke liye: **Purpose → Kaun call karta hai → Ye kya call karti hai �
 | `frontend/src/app/admin/users/page.tsx` | Apni company ke users — invite, role/department, deactivate, password reset | User management UX |
 | `frontend/src/components/ui/index.tsx` | Buttons, cards, badges, tables, stat tiles | Design system |
 | `frontend/src/components/charts.tsx` | SegmentedBar, BarList, RingMeter (no library) | Chart badlav |
-| `frontend/src/app/dashboard/page.tsx` | Dashboard (real API data) | Dashboard |
+| `frontend/src/app/dashboard/page.tsx` | Dashboard — members/admins see knowledge; `platform_admin` lands on Control plane (registry + trail only) | Dashboard |
 | `frontend/next.config.mjs` | `NEXT_OUTPUT_MODE=export` → static; warna standalone | Build mode |
 | `amplify.yml` | Amplify build commands | Amplify build badalna |
 

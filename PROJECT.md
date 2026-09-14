@@ -359,8 +359,9 @@ documents, departments, recent queries, usage, confidence, citations.
 | Feedback | Audit Logs | |
 | | Deployments | |
 
-Navigation is role-aware: a platform operator sees the control plane and no chat
-or documents, because the platform tenant holds none. Hiding a page is a
+Navigation is role-aware: a platform operator lands on a Control plane home
+(registry and onboarding trail only) and sees no chat or documents, because the
+platform tenant holds none. Hiding a page is a
 convenience, never the boundary — every route is authorized again server-side,
 and each frontend gate mirrors exactly one backend dependency
 (`AdminOnly`/`AdminUser`, `TenantAdminOnly`/`TenantAdminUser`,

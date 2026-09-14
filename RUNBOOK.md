@@ -198,11 +198,12 @@ page is empty, the user list holds only Contoso's people, and chat answers "I
 could not find anything" — a complete admin of Contoso cannot see one row of
 Northwind's data.
 
-**Onboarding.** Sign in as `platform@ekba.example`, open **Companies**, and
-onboard one: type a name, watch the tenant id slug appear, create it, then invite
-its administrator. Sign out, sign in as that administrator, and create its users.
-Nothing about the company you just made is visible to any other company — and the
-operator that created it cannot open its documents either.
+**Onboarding.** Sign in as `platform@ekba.example`. You land on the **Control
+plane** — company counts and the onboarding trail, not chat or documents. Open
+**Companies**, type a name, watch the tenant id slug appear, create it, then
+invite its administrator. Sign out, sign in as that administrator, and create
+its users. Nothing about the company you just made is visible to any other
+company — and the operator that created it cannot open its documents either.
 
 ### Developer sign-in (a token instead)
 
