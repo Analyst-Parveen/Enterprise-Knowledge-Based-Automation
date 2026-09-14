@@ -1,11 +1,26 @@
 name: Deploy
 
-# Manual only. This spends money, so it is never triggered by a push.
+# Backend CD. A push to aws-deployment that touches the backend - or a manual
+# run - goes through the whole CI workflow first. Only when every CI job passes:
 #
-#   ECR -> Terraform validate -> plan -> apply -> CodeDeploy blue-green
-#       -> health checks -> verify -> seed -> E2E -> rollback if needed
+#   ECR build/push (git SHA tag) -> ECR scan gate -> task definition revision
+#       (api image swapped, nothing else) -> CodeDeploy blue-green
+#       -> ECS runs the new revision -> health + verify.sh -> roll back if needed
+#
+# This releases a new IMAGE onto the running dev stack. It never runs Terraform:
+# the OIDC deploy role cannot plan envs/dev (no rds:*, no GetSecretValue), and
+# widening it is a protected-baseline change. Infrastructure, env var, secret or
+# sizing changes, and bringing a destroyed stack back, still go through
+# ./scripts/deploy.sh - which stays the manual fallback.
 
 on:
+  push:
+    branches: [aws-deployment]
+    paths:
+      - backend/**
+      - infra/docker/backend.Dockerfile
+      - .github/workflows/deploy.yml
+      - .github/workflows/ci.yml
   workflow_dispatch:
     inputs:
       environment:
@@ -24,12 +39,13 @@ permissions:
   id-token: write # OIDC. No stored AWS access keys anywhere.
 
 concurrency:
-  group: deploy-${{ inputs.environment }}
+  group: deploy-${{ inputs.environment || 'dev' }}
   cancel-in-progress: false # never interrupt an in-flight deployment
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   PROJECT_CODE: ekba
+  ENVIRONMENT: ${{ inputs.environment || 'dev' }}
 
 jobs:
   guard:
@@ -37,16 +53,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Require explicit confirmation
-        if: inputs.confirm != 'DEPLOY'
+        if: github.event_name == 'workflow_dispatch' && inputs.confirm != 'DEPLOY'
         run: |
           echo "::error::You must type DEPLOY to confirm. Nothing was deployed."
           exit 1
 
+  # The release gate: lint, types, tests, security scans, Docker build.
+  ci:
+    name: CI
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+
   deploy:
     name: Build, deploy, verify
     runs-on: ubuntu-latest
-    needs: guard
-    environment: ${{ inputs.environment }}
+    needs: [guard, ci]
+    environment: ${{ inputs.environment || 'dev' }}
     outputs:
       image: ${{ steps.build.outputs.image }}
     steps:
@@ -82,18 +104,49 @@ jobs:
             exit 1
           fi
 
+      # The dev stack is ephemeral: between destroy.sh and deploy.sh there is no
+      # service to release onto. That is its normal resting state, so skip the
+      # release loudly instead of failing every backend push.
+      - name: Check the stack is running
+        id: stack
+        env:
+          API_URL: ${{ vars.API_URL }}
+        run: |
+          if [ -z "$API_URL" ]; then
+            echo "::error::Repository variable API_URL (the CloudFront API URL, terraform output api_url in envs/frontend) is not set. A deploy that cannot be verified is not started."
+            exit 1
+          fi
+          APP="$PROJECT_CODE-$ENVIRONMENT"
+          DESIRED=$(aws ecs describe-services --cluster "$APP" --services "$APP" \
+            --query 'services[?status==`ACTIVE`] | [0].desiredCount' --output text 2>/dev/null || echo None)
+          if [ "$DESIRED" = "None" ] || [ "$DESIRED" = "0" ]; then
+            echo "::warning::ECS service $APP is not running (desired count: $DESIRED). Nothing was built or deployed. Bring the stack up with ./scripts/deploy.sh."
+            echo "### Deploy skipped: ECS service \`$APP\` is not running. Use \`./scripts/deploy.sh\`." >> "$GITHUB_STEP_SUMMARY"
+            echo "live=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # What serves traffic now - the rollback target if the new release fails
+          # after CodeDeploy has already finished.
+          PREVIOUS=$(aws ecs describe-services --cluster "$APP" --services "$APP" \
+            --query 'services[0].taskSets[?status==`PRIMARY`] | [0].taskDefinition' --output text)
+          echo "running revision: $PREVIOUS"
+          echo "live=true" >> "$GITHUB_OUTPUT"
+          echo "PREVIOUS_TASK_DEF=$PREVIOUS" >> "$GITHUB_ENV"
+
       # ---- build and push -------------------------------------------------
       - name: Log in to ECR
+        if: steps.stack.outputs.live == 'true'
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push backend
+        if: steps.stack.outputs.live == 'true'
         id: build
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
-          REPO: ${{ env.PROJECT_CODE }}-${{ inputs.environment }}-backend
           TAG: ${{ github.sha }}
         run: |
+          REPO="$PROJECT_CODE-$ENVIRONMENT-backend"
           # Immutable SHA tag. Never :latest. Re-running the workflow for the
           # same commit reuses the image already in ECR instead of attempting
           # an overwrite that tag immutability rejects. The checkout is always
@@ -111,110 +164,70 @@ jobs:
           echo "image=$REGISTRY/$REPO:$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Block on critical image findings
+        if: steps.stack.outputs.live == 'true'
         env:
-          REPO: ${{ env.PROJECT_CODE }}-${{ inputs.environment }}-backend
           TAG: ${{ github.sha }}
         run: |
+          REPO="$PROJECT_CODE-$ENVIRONMENT-backend"
           aws ecr wait image-scan-complete --repository-name "$REPO" --image-id imageTag="$TAG" || true
+          # An unfinished or failed scan is not a clean scan.
+          STATUS=$(aws ecr describe-image-scan-findings \
+            --repository-name "$REPO" --image-id imageTag="$TAG" \
+            --query 'imageScanStatus.status' --output text 2>/dev/null || echo UNKNOWN)
+          if [ "$STATUS" != "COMPLETE" ]; then
+            echo "::error::ECR scan status is $STATUS, not COMPLETE. Not deploying."
+            exit 1
+          fi
           CRITICAL=$(aws ecr describe-image-scan-findings \
             --repository-name "$REPO" --image-id imageTag="$TAG" \
-            --query 'imageScanFindings.findingSeverityCounts.CRITICAL' --output text 2>/dev/null || echo None)
+            --query 'imageScanFindings.findingSeverityCounts.CRITICAL' --output text)
           echo "critical findings: $CRITICAL"
           if [ "$CRITICAL" != "None" ] && [ "$CRITICAL" != "0" ]; then
             echo "::error::$CRITICAL critical findings. Not deploying."
             exit 1
           fi
 
-      # ---- infrastructure --------------------------------------------------
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          # 1.11+: the RDS password is a write-only argument (never in state).
-          terraform_version: "1.15.8"
-
-      # A NEW database instance is rebuilt from the newest snapshot destroy.sh
-      # took (same logic as scripts/deploy.sh). Ignored while the instance exists.
-      - name: Find the database snapshot to restore
-        id: snapshot
+      # ---- task definition --------------------------------------------------
+      # Copy the newest revision Terraform (or a previous release) registered and
+      # change only the api image. Roles, secrets, env, sizing and tags stay
+      # exactly as Terraform set them. The JSON is never printed: it names the
+      # task's configuration.
+      - name: Register task definition revision
+        if: steps.stack.outputs.live == 'true'
         env:
-          DB: ${{ env.PROJECT_CODE }}-${{ inputs.environment }}-postgres
-        run: |
-          ID=""
-          if ! aws rds describe-db-instances --db-instance-identifier "$DB" >/dev/null 2>&1; then
-            ID=$(aws rds describe-db-snapshots --db-instance-identifier "$DB" --snapshot-type manual \
-              --query 'reverse(sort_by(DBSnapshots[?Status==`available`], &SnapshotCreateTime))[0].DBSnapshotIdentifier' \
-              --output text)
-            [ "$ID" = "None" ] && ID=""
-          fi
-          echo "restore snapshot: ${ID:-none}"
-          echo "id=$ID" >> "$GITHUB_OUTPUT"
-
-      - name: Terraform plan
-        working-directory: infra/terraform/envs/${{ inputs.environment }}
-        env:
-          TF_VAR_backend_image: ${{ steps.build.outputs.image }}
-          TF_VAR_expected_aws_account_id: ${{ vars.EXPECTED_AWS_ACCOUNT_ID }}
-          TF_VAR_allowed_cidrs: '["${{ vars.DEMO_ALLOWED_CIDR }}"]'
-          TF_VAR_s3_bucket: ${{ vars.S3_BUCKET }}
-          TF_VAR_cognito_client_id: ${{ vars.COGNITO_CLIENT_ID }}
-          TF_VAR_restore_snapshot_id: ${{ steps.snapshot.outputs.id }}
-        run: |
-          terraform init -input=false \
-            -backend-config="bucket=ekba-tfstate-${{ vars.EXPECTED_AWS_ACCOUNT_ID }}" \
-            -backend-config="key=${{ inputs.environment }}/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="dynamodb_table=ekba-tfstate-lock" \
-            -backend-config="encrypt=true"
-          terraform fmt -check -recursive
-          terraform validate
-          terraform plan -input=false -out=tfplan
-
-      # A deploy must never destroy. Surface it loudly if the plan says otherwise.
-      - name: Reject destructive plans
-        working-directory: infra/terraform/envs/${{ inputs.environment }}
-        run: |
-          # Rendered plan, not raw JSON: the JSON drift section reports
-          # resources deleted OUTSIDE Terraform as {"actions":["delete"]}.
-          DESTROYS=$(terraform show -no-color tfplan \
-            | grep -cE '^[[:space:]]+# .* will be destroyed' || true)
-          echo "resources to be destroyed: $DESTROYS"
-          if [ "$DESTROYS" -gt 0 ]; then
-            terraform show -no-color tfplan | grep -E '^\s+# .*(destroyed|replaced)' || true
-            echo "::error::Plan destroys $DESTROYS resource(s). A deploy must not destroy. Review manually."
-            exit 1
-          fi
-
-      - name: Terraform apply
-        working-directory: infra/terraform/envs/${{ inputs.environment }}
-        run: terraform apply -input=false tfplan
-
-      # ---- blue-green release ---------------------------------------------
-      - name: CodeDeploy blue-green
-        env:
-          APP: ${{ env.PROJECT_CODE }}-${{ inputs.environment }}
           IMAGE: ${{ steps.build.outputs.image }}
         run: |
-          TASK_DEF_ARN=$(aws ecs describe-task-definition --task-definition "$APP" \
-            --query 'taskDefinition.taskDefinitionArn' --output text)
+          APP="$PROJECT_CODE-$ENVIRONMENT"
+          aws ecs describe-task-definition --task-definition "$APP" --include TAGS > current.json
+          jq -e '.taskDefinition.containerDefinitions[] | select(.name == "api")' current.json > /dev/null \
+            || { echo "::error::task definition $APP has no api container"; exit 1; }
+          jq --arg image "$IMAGE" '.taskDefinition
+            | .containerDefinitions |= map(if .name == "api" then .image = $image else . end)
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                  .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' \
+            current.json > taskdef.json
+          TAGS=$(jq -c '.tags // []' current.json)
+          TAG_ARGS=()
+          [ "$TAGS" != "[]" ] && TAG_ARGS=(--tags "$TAGS")
+          NEW_TASK_DEF=$(aws ecs register-task-definition --cli-input-json file://taskdef.json \
+            "${TAG_ARGS[@]}" --query 'taskDefinition.taskDefinitionArn' --output text)
+          rm -f current.json taskdef.json
+          echo "registered: $NEW_TASK_DEF"
+          echo "NEW_TASK_DEF=$NEW_TASK_DEF" >> "$GITHUB_ENV"
 
-          cat > appspec.json <<EOF
-          {
-            "version": 0.0,
-            "Resources": [{
-              "TargetService": {
-                "Type": "AWS::ECS::Service",
-                "Properties": {
-                  "TaskDefinition": "$TASK_DEF_ARN",
-                  "LoadBalancerInfo": { "ContainerName": "api", "ContainerPort": 8000 }
-                }
-              }
-            }]
-          }
-          EOF
+      # ---- blue-green release ---------------------------------------------
+      # Migrations run inside the new task at startup (alembic upgrade head),
+      # written backward-compatible so blue keeps working while green starts.
+      - name: CodeDeploy blue-green
+        if: steps.stack.outputs.live == 'true'
+        run: |
+          APP="$PROJECT_CODE-$ENVIRONMENT"
+          APPSPEC=$(printf '{"version":0.0,"Resources":[{"TargetService":{"Type":"AWS::ECS::Service","Properties":{"TaskDefinition":"%s","LoadBalancerInfo":{"ContainerName":"api","ContainerPort":8000}}}}]}' "$NEW_TASK_DEF")
 
           DEPLOY_ID=$(aws deploy create-deployment \
             --application-name "$APP" \
             --deployment-group-name "$APP-dg" \
-            --revision "revisionType=AppSpecContent,appSpecContent={content='$(cat appspec.json | tr -d '\n')'}" \
+            --revision "revisionType=AppSpecContent,appSpecContent={content='$APPSPEC'}" \
             --query 'deploymentId' --output text)
 
           echo "deployment: $DEPLOY_ID"
@@ -224,37 +237,73 @@ jobs:
           aws deploy wait deployment-successful --deployment-id "$DEPLOY_ID"
 
       # ---- post-deploy: an unverified deploy is a FAILED deploy ------------
-      - name: Health check
-        working-directory: infra/terraform/envs/${{ inputs.environment }}
+      - name: Confirm ECS runs the new revision
+        if: steps.stack.outputs.live == 'true'
         run: |
-          APP_URL=$(terraform output -raw app_url)
-          echo "APP_URL=$APP_URL" >> "$GITHUB_ENV"
-          for i in $(seq 1 20); do
-            if curl -fsS "$APP_URL/api/v1/health"; then echo " healthy"; exit 0; fi
+          APP="$PROJECT_CODE-$ENVIRONMENT"
+          RUNNING=$(aws ecs describe-services --cluster "$APP" --services "$APP" \
+            --query 'services[0].taskSets[?status==`PRIMARY`] | [0].taskDefinition' --output text)
+          echo "primary revision: $RUNNING"
+          if [ "$RUNNING" != "$NEW_TASK_DEF" ]; then
+            echo "::error::ECS primary is $RUNNING, expected $NEW_TASK_DEF"
+            exit 1
+          fi
+
+      # Through CloudFront: the ALB admits only the operator IP, so a GitHub
+      # runner can never reach it directly.
+      - name: Health check
+        if: steps.stack.outputs.live == 'true'
+        env:
+          API_URL: ${{ vars.API_URL }}
+        run: |
+          for _ in $(seq 1 20); do
+            if curl -fsS --max-time 10 "$API_URL/api/v1/health" | grep -q '"status":"ok"'; then
+              echo "healthy"; exit 0
+            fi
             sleep 10
           done
           echo "::error::health check never passed"
           exit 1
 
+      # Readiness (PostgreSQL + Redis + Qdrant) and liveness. The AWS posture
+      # checks need rds:Describe*, which the deploy role does not have - the
+      # manual deploy.sh path still runs them.
       - name: Verify
+        if: steps.stack.outputs.live == 'true'
         run: ./scripts/verify.sh
         env:
-          ENVIRONMENT: ${{ inputs.environment }}
-          EXPECTED_AWS_ACCOUNT_ID: ${{ vars.EXPECTED_AWS_ACCOUNT_ID }}
-          API_URL: ${{ env.APP_URL }}
-
-      # No seed/e2e step here: the task migrates and seeds itself at startup
-      # (RDS is in private subnets nothing outside the VPC can reach), and
-      # seed.sh / test-e2e.sh target the LOCAL stack, not the deployed one.
+          VERIFY_AWS: "0"
+          API_URL: ${{ vars.API_URL }}
 
       # ---- rollback --------------------------------------------------------
       - name: Roll back on failure
-        if: failure()
+        if: failure() && env.DEPLOY_ID != ''
         run: |
-          echo "::warning::Deploy failed after release. Rolling the application back."
-          aws deploy stop-deployment --deployment-id "$DEPLOY_ID" --auto-rollback-enabled || true
-        env:
-          DEPLOY_ID: ${{ env.DEPLOY_ID }}
+          APP="$PROJECT_CODE-$ENVIRONMENT"
+          STATUS=$(aws deploy get-deployment --deployment-id "$DEPLOY_ID" \
+            --query 'deploymentInfo.status' --output text)
+          echo "deployment $DEPLOY_ID status: $STATUS"
+          case "$STATUS" in
+            Failed|Stopped)
+              echo "::warning::CodeDeploy did not complete and rolled back automatically. Blue kept serving traffic." ;;
+            Succeeded)
+              # Traffic is already on the new revision and blue is gone. Release
+              # the revision that was serving before, the same blue-green way.
+              echo "::warning::Release completed but failed verification. Redeploying $PREVIOUS_TASK_DEF."
+              APPSPEC=$(printf '{"version":0.0,"Resources":[{"TargetService":{"Type":"AWS::ECS::Service","Properties":{"TaskDefinition":"%s","LoadBalancerInfo":{"ContainerName":"api","ContainerPort":8000}}}}]}' "$PREVIOUS_TASK_DEF")
+              BACK_ID=$(aws deploy create-deployment \
+                --application-name "$APP" \
+                --deployment-group-name "$APP-dg" \
+                --revision "revisionType=AppSpecContent,appSpecContent={content='$APPSPEC'}" \
+                --query 'deploymentId' --output text)
+              echo "rollback deployment: $BACK_ID"
+              aws deploy wait deployment-successful --deployment-id "$BACK_ID" ;;
+            *)
+              # Still in progress (for example inside the blue termination
+              # window): stopping it moves traffic back to blue.
+              echo "::warning::Stopping $DEPLOY_ID with auto-rollback."
+              aws deploy stop-deployment --deployment-id "$DEPLOY_ID" --auto-rollback-enabled ;;
+          esac
 
       - name: Cost reminder
         if: always()

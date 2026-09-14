@@ -8,6 +8,8 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  # deploy.yml runs this whole workflow as its gate before any release.
+  workflow_call:
 
 permissions:
   contents: read
