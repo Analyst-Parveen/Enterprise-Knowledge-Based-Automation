@@ -38,6 +38,11 @@ dev = [
     "pip-audit>=2.7",
 ]
 
+# Only the application packages. alembic/ holds migrations (and would shadow
+# the alembic library if installed); tests/ and scripts/ are not shipped.
+[tool.setuptools.packages.find]
+include = ["app*", "seeds*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
