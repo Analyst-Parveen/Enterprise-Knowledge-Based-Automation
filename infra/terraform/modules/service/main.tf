@@ -341,7 +341,9 @@ resource "aws_ecs_task_definition" "app" {
       }
 
       healthCheck = {
-        command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:${var.container_port}/api/v1/health || exit 1"]
+        # Python, not curl: the image ships no curl (unfixed CRITICAL CVEs).
+        # urlopen raises on any non-2xx response, like curl -f.
+        command     = ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${var.container_port}/api/v1/health', timeout=4)"]
         interval    = 30
         timeout     = 5
         retries     = 3
