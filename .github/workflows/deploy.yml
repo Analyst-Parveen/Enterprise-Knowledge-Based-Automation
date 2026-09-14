@@ -186,15 +186,16 @@ jobs:
           # missing or unfinished scan as clean. (This role cannot start scans.)
           STATUS=NOT_FOUND
           for _ in $(seq 1 60); do
+            # Scalar query only: AWS CLI v2 text output crashes on a list that
+            # holds a null, and the findings are null while IN_PROGRESS.
             if OUT=$(aws ecr describe-image-scan-findings --repository-name "$REPO" \
                   --image-id imageDigest="$DIGEST" \
-                  --query '[imageScanStatus.status, imageScanFindings.findingSeverityCounts.CRITICAL]' \
-                  --output text 2>&1); then
-              read -r STATUS CRITICAL <<< "$OUT"
+                  --query 'imageScanStatus.status' --output text 2>&1); then
+              STATUS="$OUT"
             elif echo "$OUT" | grep -q ScanNotFoundException; then
               STATUS=NOT_FOUND
             else
-              echo "::error::could not read scan findings: $OUT"
+              echo "::error::could not read scan findings: $(echo "$OUT" | tr -s '\r\n' ' ')"
               exit 1
             fi
             case "$STATUS" in
@@ -211,6 +212,9 @@ jobs:
             exit 1
           fi
 
+          CRITICAL=$(aws ecr describe-image-scan-findings --repository-name "$REPO" \
+            --image-id imageDigest="$DIGEST" \
+            --query 'imageScanFindings.findingSeverityCounts.CRITICAL' --output text)
           echo "critical findings: $CRITICAL"
           if [ "$CRITICAL" != "None" ] && [ "$CRITICAL" != "0" ]; then
             aws ecr describe-image-scan-findings --repository-name "$REPO" --image-id imageDigest="$DIGEST" \
