@@ -10,6 +10,8 @@ import { AlertTriangle, Inbox, type LucideIcon } from "lucide-react";
 import * as React from "react";
 import { twMerge } from "tailwind-merge";
 
+import { COMPANY_SUSPENDED_MESSAGE } from "@/lib/api";
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
@@ -251,6 +253,7 @@ export function EmptyState({
 }
 
 export function ErrorState({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  const suspended = message === COMPANY_SUSPENDED_MESSAGE;
   return (
     <div
       role="alert"
@@ -258,8 +261,10 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
     >
       <AlertTriangle aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
       <div className="flex flex-col items-start gap-2">
-        <p className="text-sm font-medium text-danger">Something went wrong</p>
-        <p className="text-xs text-muted">{message}</p>
+        <p className="text-sm font-medium text-danger">
+          {suspended ? message : "Something went wrong"}
+        </p>
+        {suspended ? null : <p className="text-xs text-muted">{message}</p>}
         {onRetry ? (
           <Button variant="secondary" size="sm" onClick={onRetry}>
             Try again

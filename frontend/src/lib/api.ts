@@ -39,6 +39,10 @@ const EXPIRY_KEY = "ekba.expires_at";
  */
 const REFRESH_MARGIN_MS = 120_000;
 
+/** Shown instead of the generic error when the backend reports `company_suspended`. */
+export const COMPANY_SUSPENDED_MESSAGE =
+  "Your company account has been suspended by the service provider. Please contact your service provider for assistance.";
+
 export class ApiClientError extends Error {
   constructor(
     readonly status: number,
@@ -195,7 +199,10 @@ async function rawRequest<T>(
 
   if (!response.ok) {
     const code = payload?.error?.code ?? "unknown_error";
-    const message = payload?.error?.message ?? `Request failed (${response.status})`;
+    const message =
+      code === "company_suspended"
+        ? COMPANY_SUSPENDED_MESSAGE
+        : (payload?.error?.message ?? `Request failed (${response.status})`);
     throw new ApiClientError(
       response.status,
       code,
