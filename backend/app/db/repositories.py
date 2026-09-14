@@ -332,6 +332,18 @@ async def mark_login(session: AsyncSession, *, subject: str) -> None:
     )
 
 
+async def tenant_is_suspended(session: AsyncSession, tenant_id: str) -> bool:
+    """True only for a registered company that a platform operator suspended.
+
+    A tenant with no registry row is not treated as suspended, so tenants that
+    predate the registry keep working exactly as before.
+    """
+    is_active = (
+        await session.execute(select(Tenant.is_active).where(Tenant.id == tenant_id))
+    ).scalar_one_or_none()
+    return is_active is False
+
+
 async def get_own_tenant(session: AsyncSession, ctx: RequestContext) -> Tenant:
     """The caller's own company. There is no parameter for anyone else's."""
     tenant = (

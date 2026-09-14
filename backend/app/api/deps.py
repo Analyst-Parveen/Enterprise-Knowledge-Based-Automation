@@ -20,7 +20,9 @@ from app.core.auth import (
     verify_token,
 )
 from app.core.context import RequestContext, set_request_context
-from app.core.exceptions import AuthenticationError
+from app.core.exceptions import AuthenticationError, CompanySuspendedError
+from app.core.logging import log_security_event
+from app.db import repositories as repo
 from app.db.session import get_session
 
 _bearer = HTTPBearer(auto_error=False)
@@ -72,22 +74,51 @@ PlatformAdminUser = Annotated[RequestContext, Depends(platform_admin_context)]
 
 
 # ---------------------------------------------------------------------------
-# rate limiting
+# company suspension
 # ---------------------------------------------------------------------------
-async def rate_limit_api(ctx: CurrentUser) -> RequestContext:
-    await ratelimit.enforce(ctx, "api")
+async def _require_active_tenant(ctx: RequestContext, session: AsyncSession) -> None:
+    """Block a suspended company's workspace, server-side.
+
+    Platform operators live in the platform tenant and must keep working so
+    they can reactivate a company - they are never subject to this check.
+    """
+    if ctx.is_platform_admin:
+        return
+    if await repo.tenant_is_suspended(session, ctx.tenant_id):
+        log_security_event(
+            "tenant.suspended_access_denied", reason="company_suspended", severity="warning"
+        )
+        raise CompanySuspendedError()
+
+
+async def active_tenant_context(ctx: CurrentUser, session: DbSession) -> RequestContext:
+    await _require_active_tenant(ctx, session)
     return ctx
 
 
-async def rate_limit_upload(ctx: CurrentUser) -> RequestContext:
+ActiveTenantUser = Annotated[RequestContext, Depends(active_tenant_context)]
+
+
+# ---------------------------------------------------------------------------
+# rate limiting
+# ---------------------------------------------------------------------------
+async def rate_limit_api(ctx: CurrentUser, session: DbSession) -> RequestContext:
+    await ratelimit.enforce(ctx, "api")
+    await _require_active_tenant(ctx, session)
+    return ctx
+
+
+async def rate_limit_upload(ctx: CurrentUser, session: DbSession) -> RequestContext:
     # Uploads count against BOTH buckets: 5/min uploads and 20/min overall.
     await ratelimit.enforce(ctx, "api")
     await ratelimit.enforce(ctx, "upload")
+    await _require_active_tenant(ctx, session)
     return ctx
 
 
-async def rate_limit_server(ctx: CurrentUser) -> RequestContext:
+async def rate_limit_server(ctx: CurrentUser, session: DbSession) -> RequestContext:
     await ratelimit.enforce(ctx, "server")
+    await _require_active_tenant(ctx, session)
     return ctx
 
 

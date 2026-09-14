@@ -52,6 +52,13 @@ class TenantIsolationError(AuthorizationError):
     message = "Resource not found."  # deliberately indistinguishable from 404
 
 
+class CompanySuspendedError(AuthorizationError):
+    """The caller's company has been suspended by the platform operator."""
+
+    code = "company_suspended"
+    message = "Your company's workspace is suspended. Contact your service provider."
+
+
 class NotFoundError(AppError):
     status_code = 404
     code = "not_found"

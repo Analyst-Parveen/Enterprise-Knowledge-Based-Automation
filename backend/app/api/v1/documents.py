@@ -6,7 +6,7 @@ import asyncio
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, Query, UploadFile
 
-from app.api.deps import CurrentUser, DbSession, RateLimitedUser, UploadUser
+from app.api.deps import ActiveTenantUser, DbSession, RateLimitedUser, UploadUser
 from app.core.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
@@ -185,7 +185,9 @@ async def download_document(
 
 
 @router.delete("/{document_id}", response_model=DeleteResponse)
-async def delete_document(ctx: CurrentUser, session: DbSession, document_id: str) -> DeleteResponse:
+async def delete_document(
+    ctx: ActiveTenantUser, session: DbSession, document_id: str
+) -> DeleteResponse:
     """Deletion requires ownership or admin in the same tenant. Always audited.
 
     Removes the S3 object, the DB row (soft), and ALL Qdrant points.
