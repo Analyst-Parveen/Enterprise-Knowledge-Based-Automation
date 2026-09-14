@@ -186,9 +186,10 @@ jobs:
           # missing or unfinished scan as clean. (This role cannot start scans.)
           STATUS=NOT_FOUND
           for _ in $(seq 1 60); do
-            # Scalar query only: AWS CLI v2 text output crashes on a list that
-            # holds a null, and the findings are null while IN_PROGRESS.
-            if OUT=$(aws ecr describe-image-scan-findings --repository-name "$REPO" \
+            # --no-paginate: AWS CLI v2's paginated text output crashes while
+            # the scan is IN_PROGRESS ("'NoneType' object does not support
+            # item assignment") because imageScanFindings is still null.
+            if OUT=$(aws ecr describe-image-scan-findings --no-paginate --repository-name "$REPO" \
                   --image-id imageDigest="$DIGEST" \
                   --query 'imageScanStatus.status' --output text 2>&1); then
               STATUS="$OUT"
@@ -212,7 +213,7 @@ jobs:
             exit 1
           fi
 
-          CRITICAL=$(aws ecr describe-image-scan-findings --repository-name "$REPO" \
+          CRITICAL=$(aws ecr describe-image-scan-findings --no-paginate --repository-name "$REPO" \
             --image-id imageDigest="$DIGEST" \
             --query 'imageScanFindings.findingSeverityCounts.CRITICAL' --output text)
           echo "critical findings: $CRITICAL"
