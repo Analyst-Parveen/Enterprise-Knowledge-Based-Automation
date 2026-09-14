@@ -43,7 +43,9 @@ concurrency:
   cancel-in-progress: false # never interrupt an in-flight deployment
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION }}
+  # Repository variable first; otherwise the region every Terraform env
+  # defaults to (infra/terraform/envs/*/variables.tf).
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
   PROJECT_CODE: ekba
   ENVIRONMENT: ${{ inputs.environment || 'dev' }}
 
