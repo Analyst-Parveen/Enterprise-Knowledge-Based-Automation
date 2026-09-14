@@ -31,29 +31,52 @@ git rev-parse HEAD                          # record the SHA for the report
 If the account, region, workspace, or state does not match expectations —
 **stop and ask the user.** Do not guess.
 
+Two AWS preconditions learned the hard way:
+
+```bash
+aws freetier get-account-plan-state --region us-east-1   # must be PAID - the Free plan
+                                                          # rejects CodeDeploy (SubscriptionRequiredException)
+curl -s https://checkip.amazonaws.com                    # must match allowed_cidrs in
+grep allowed_cidrs infra/terraform/envs/dev/terraform.tfvars   # envs/dev/terraform.tfvars
+```
+
+If the operator IP differs from `allowed_cidrs`, the deploy itself succeeds but
+`verify.sh` cannot reach the ALB and the run is reported as failed. Tell the user,
+update `allowed_cidrs` (a one-resource, in-place security-group change), then deploy.
+
+In practice all of Steps 1–6 are `./scripts/deploy.sh`; the steps below are what
+it does and what to check.
+
 ## Step 2 — Local gate
 
 Nothing deploys that has not passed locally first.
 
+`deploy.sh` runs, from `backend/` with the project venv:
+
 ```bash
-docker compose -f infra/docker/docker-compose.yml up -d
-ruff check backend && ruff format --check backend
-mypy backend
-pytest backend/tests/unit backend/tests/integration backend/tests/security
+ruff check app tests seeds && ruff format --check app tests seeds
+ENVIRONMENT=dev AI_PROVIDER=local DEV_AUTH_ENABLED=true \
+  pytest tests/unit tests/integration tests/security tests/evaluation -q   # 279 on 2026-09-12
+(cd ../frontend && npm run typecheck)
 ```
+
+It also refuses to run past the cost guard: gross usage (credits excluded) since
+`COST_GUARD_START` must be below `COST_GUARD_SHUTDOWN_USD` ($18).
 
 All must pass. If a test fails, fix the code — never the test.
 
 ## Step 3 — Build, scan, push
 
 ```bash
-docker build -t ekba-backend:$GIT_SHA -f infra/docker/backend.Dockerfile .
+docker build -t ekba-dev-backend:$GIT_SHA -f infra/docker/backend.Dockerfile .
 # push to ECR, then confirm the scan result
-aws ecr describe-image-scan-findings --repository-name ekba-backend --image-id imageTag=$GIT_SHA
+aws ecr describe-image-scan-findings --repository-name ekba-dev-backend --image-id imageTag=$GIT_SHA
 ```
 
 Critical findings block the deploy. Images are tagged with the git SHA, never
-deployed from `latest`.
+deployed from `latest`. Tags are immutable: `deploy.sh` refuses to build when
+`backend/` or the Dockerfile has uncommitted changes, and reuses the image when
+ECR already holds that SHA.
 
 ## Step 4 — Infrastructure
 
@@ -73,20 +96,40 @@ terraform apply tfplan
 
 ## Step 5 — Release
 
-- Migrations first (backward compatible), then the new version.
-- CodeDeploy blue-green; traffic shifts only after health checks pass.
+- Migrations first (backward compatible), then the new version. On AWS the API
+  container runs `alembic upgrade head` and the seed at task start.
+- CodeDeploy blue-green; traffic shifts only after health checks pass. Every
+  `deploy.sh` run creates a full blue-green deployment (about 9 minutes,
+  including the 5-minute rollback window), even when nothing changed.
 - Keep the previous version available for the rollback window.
 
-## Step 6 — Post-deploy (all of it)
+Follow it with:
 
 ```bash
-./scripts/verify.sh      # infrastructure, services, AI pipeline
-./scripts/seed.sh        # dashboards must not be empty
-./scripts/test-e2e.sh    # real user journeys
+aws deploy get-deployment --deployment-id "$ID" --query 'deploymentInfo.status'
+aws deploy get-deployment-target --deployment-id "$ID" --target-id ekba-dev:ekba-dev \
+  --query 'deploymentTarget.ecsTarget.lifecycleEvents[].[lifecycleEventName,status]' --output text
 ```
 
-If verification or E2E fails: run `./scripts/rollback.sh`, then report the
-failure honestly. Do not describe a deploy as successful when verification failed.
+## Step 6 — Post-deploy
+
+```bash
+./scripts/verify.sh      # run by deploy.sh against the ALB URL
+```
+
+`seed.sh` and `test-e2e.sh` target the **local** stack. Do not run them as
+post-deploy checks for AWS — they would test the wrong system. On AWS the task
+seeds itself; with Bedrock quotas at 0 that seed fails and the API runs without
+demo data, which is expected, not a deploy failure.
+
+If verification fails, **diagnose before rolling back or changing code.** A
+`verify.sh` health failure after a successful CodeDeploy stage is most often the
+operator IP, not the application. Check, in order: the operator IP vs
+`allowed_cidrs`; ALB target health (`describe-target-health`); the API log
+(`/ekba/dev/service`, stream prefix `api`) for `/api/v1/health` 200s from
+`10.42.x.x`. `deploy.sh` calls `rollback.sh` on a verify failure, but that script
+does not shift traffic yet — it only re-runs `verify.sh`. Report the failure
+honestly. Do not describe a deploy as successful when verification failed.
 
 ## Step 7 — Report
 
@@ -96,6 +139,9 @@ cost impact. No secret values in the report.
 
 ## Step 8 — Cost reminder
 
-Remind the user that the environment is ephemeral by design and that
-`./scripts/destroy.sh` should be run when the demo is finished, so nothing
-expensive stays running.
+Remind the user that the environment is ephemeral by design, burns ~$0.11/hour
+(including the RDS database),
+and that `./scripts/destroy.sh` should be run when the demo is finished, so
+nothing expensive stays running. State whether the cost guard is armed
+(`./scripts/cost-check.sh`) — while it is in dry-run, nothing stops the stack
+automatically.

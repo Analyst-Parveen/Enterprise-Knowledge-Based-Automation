@@ -14,11 +14,12 @@ citations are genuine - never fabricated rows.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from app.core.context import RequestContext
+from app.core.context import PLATFORM_TENANT_ID, RequestContext
 from app.core.logging import configure_logging, get_logger
 from app.db.models import (
     AuditEvent,
@@ -43,12 +44,20 @@ from app.services.rag.prompts import (
     SYSTEM_PROMPT_NAME,
     SYSTEM_PROMPT_VERSION,
 )
+from seeds.documents import SEED_DOCUMENT_BODIES
 
 logger = get_logger("seed")
 
 # Stable IDs make the seed idempotent.
 TENANT_A = "seed-tenant-northwind"
 TENANT_B = "seed-tenant-contoso"
+
+# The service provider's own tenant, created by migration 0002. Seeding an
+# operator into it is what makes the onboarding flow demonstrable locally: a
+# platform admin has to exist before it can create the first company, and on
+# AWS that identity is created out-of-band by scripts/bootstrap-platform-admin.sh.
+PLATFORM_TENANT = PLATFORM_TENANT_ID
+PLATFORM_ADMIN_ID = "seed-platform-admin"
 
 SEED_DOCUMENTS = [
     (
@@ -169,8 +178,23 @@ async def seed() -> None:
 
     async with get_sessionmaker()() as session:
         # -- tenants -----------------------------------------------------
+        # The platform tenant already exists (migration 0002); upserting it
+        # keeps the seed runnable against a database restored from an older
+        # snapshot without assuming migration order.
+        await _upsert_tenant(session, PLATFORM_TENANT, "Platform Operations", PLATFORM_TENANT_ID)
         await _upsert_tenant(session, TENANT_A, "Northwind Industries", "northwind")
         await _upsert_tenant(session, TENANT_B, "Contoso Ltd", "contoso")
+
+        # -- the service provider's operator -----------------------------
+        await _upsert_user(
+            session,
+            PLATFORM_ADMIN_ID,
+            PLATFORM_TENANT,
+            "platform@ekba.example",
+            UserRole.PLATFORM_ADMIN,
+            "Platform Operator",
+            None,
+        )
 
         # -- users -------------------------------------------------------
         await _upsert_user(
@@ -424,6 +448,12 @@ async def seed() -> None:
             )
 
         await session.commit()
+
+        # ---- index into Qdrant --------------------------------------------
+        # Without this the dashboards look populated but every question returns
+        # "not found", because retrieval has nothing to search.
+        indexed = await index_seed_documents(session, ctx)
+
         logger.info(
             "seed_completed",
             extra={
@@ -432,12 +462,93 @@ async def seed() -> None:
                     "users": 4,
                     "documents": len(SEED_DOCUMENTS),
                     "conversations": len(SEED_QUESTIONS),
+                    "chunks_indexed": indexed,
                     "seeded_tenant": ctx.tenant_id,
                 }
             },
         )
 
     await dispose_engine()
+
+
+async def index_seed_documents(session, ctx: RequestContext) -> int:  # type: ignore[no-untyped-def]
+    """Chunk, embed and upsert the seed bodies through the real pipeline.
+
+    Uses the same chunker, the same embedding provider and the same Qdrant
+    payload contract as a genuine upload, so citations and confidence in the
+    demo are real rather than fabricated.
+
+    Idempotent: the tenant's existing points are removed first, so re-running
+    the seed does not accumulate duplicates.
+    """
+    from app.services import vector
+    from app.services.ai.provider import get_provider
+    from app.services.ingestion.chunker import chunk_blocks
+    from app.services.ingestion.extractors import ExtractedBlock
+    from app.services.security.injection import scan_content
+
+    await vector.ensure_collection()
+
+    provider = get_provider()
+    created_at = datetime.now(UTC).isoformat()
+    total = 0
+
+    for doc_id, name, dept, modality, _pages, _claimed in SEED_DOCUMENTS:
+        bodies = SEED_DOCUMENT_BODIES.get(doc_id, [])
+        if not bodies:
+            continue  # the deliberately-failed ingestion has no content
+
+        document = await session.get(Document, doc_id)
+        if document is None:
+            continue
+
+        # Re-running the seed must not duplicate points.
+        await vector.delete_document_chunks(ctx, doc_id)
+
+        blocks = [
+            ExtractedBlock(text=body, page_number=page, section=section, modality=modality.value)
+            for page, section, body in bodies
+        ]
+        chunks = chunk_blocks(blocks)
+        if not chunks:
+            continue
+
+        result = await provider.embed([c.text for c in chunks])
+
+        payloads = [
+            vector.ChunkPayload(
+                document_id=doc_id,
+                chunk_id=str(uuid.uuid4()),
+                document_name=name,
+                page_number=chunk.page_number,
+                source_uri=document.source_uri,
+                owner_id=document.owner_id,
+                tenant_id=ctx.tenant_id,  # mandatory
+                document_version=document.version,
+                created_by=document.created_by,
+                created_at=created_at,
+                text=chunk.text,
+                modality=chunk.modality,
+                department=dept.value,
+                section=chunk.section,
+                # Same poisoning scan a real upload gets.
+                suspicious=scan_content(chunk.text).is_blocking,
+            )
+            for chunk in chunks
+        ]
+
+        total += await vector.upsert_chunks(result.vectors, payloads)
+
+        # Report the count that is actually searchable, not a made-up number.
+        document.chunk_count = len(chunks)
+        document.doc_metadata = {
+            **(document.doc_metadata or {}),
+            "embedding_model": result.model_used,
+            "embedding_dimension": result.dimension,
+        }
+
+    await session.commit()
+    return total
 
 
 if __name__ == "__main__":

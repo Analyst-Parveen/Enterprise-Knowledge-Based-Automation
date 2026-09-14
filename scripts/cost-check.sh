@@ -14,24 +14,44 @@ log "Cost check: ${PROJECT_NAME} [${ENVIRONMENT}]  ceiling \$${MAX_MONTHLY_SPEND
 preflight_aws
 
 # ---------------------------------------------------------------------------
-# 1. Month-to-date spend
+# 1. Spend since COST_GUARD_START - gross, credits, and what reaches the card
 # ---------------------------------------------------------------------------
-step "Month-to-date spend"
-SPEND="$(month_to_date_spend)"
+step "Spend since ${COST_GUARD_START}"
+SPEND="$(gross_usage_since_start)"
+CREDITS="$(credits_since_start)"
 if [ "$SPEND" = "unknown" ]; then
   warn "Cost Explorer unavailable - check the Billing console manually"
 else
-  REMAINING="$(awk -v s="$SPEND" -v m="$MAX_MONTHLY_SPEND_USD" 'BEGIN{printf "%.2f", m-s}')"
-  printf '    spent:     $%.2f\n' "$SPEND"
-  printf '    ceiling:   $%s\n'   "$MAX_MONTHLY_SPEND_USD"
-  printf '    remaining: $%s\n'   "$REMAINING"
+  [ "$CREDITS" = "unknown" ] && CREDITS=0
+  NET="$(awk -v s="$SPEND" -v c="$CREDITS" 'BEGIN{n = s + c; printf "%.2f", (n < 0 ? 0 : n)}')"
+  REMAINING="$(awk -v s="$SPEND" -v m="$COST_GUARD_SHUTDOWN_USD" 'BEGIN{printf "%.2f", m-s}')"
+  printf '    gross usage:         $%s\n' "$SPEND"
+  printf '    covered by credits:  $%s\n' "$CREDITS"
+  printf '    net (card):          $%s\n' "$NET"
+  printf '    auto-shutdown at:    $%s gross   (remaining $%s)\n' "$COST_GUARD_SHUTDOWN_USD" "$REMAINING"
 
-  OVER="$(awk -v s="$SPEND" -v m="$MAX_MONTHLY_SPEND_USD" 'BEGIN{print (s+0 >= m+0) ? 1 : 0}')"
-  NEAR="$(awk -v s="$SPEND" -v m="$MAX_MONTHLY_SPEND_USD" 'BEGIN{print (s+0 >= m*0.8) ? 1 : 0}')"
-  if [ "$OVER" = "1" ];  then err "CEILING REACHED - deploys are blocked. Destroy and review."
-  elif [ "$NEAR" = "1" ]; then warn "over 80% of the ceiling used"
+  OVER="$(awk -v s="$SPEND" -v m="$COST_GUARD_SHUTDOWN_USD" 'BEGIN{print (s+0 >= m+0) ? 1 : 0}')"
+  NEAR="$(awk -v s="$SPEND" -v m="$COST_GUARD_SHUTDOWN_USD" 'BEGIN{print (s+0 >= m*0.8) ? 1 : 0}')"
+  if [ "$OVER" = "1" ];  then err "SHUTDOWN THRESHOLD REACHED - deploys are blocked. Destroy and review."
+  elif [ "$NEAR" = "1" ]; then warn "over 80% of the shutdown threshold used"
   else ok "within budget"; fi
+
+  CARD="$(awk -v n="$NET" 'BEGIN{print (n+0 > 0) ? 1 : 0}')"
+  [ "$CARD" = "1" ] && err "charges NOT covered by credits: \$${NET} - these reach the card"
 fi
+
+# ---------------------------------------------------------------------------
+# 1b. Is the kill switch armed?
+# ---------------------------------------------------------------------------
+step "Cost guard"
+GUARD_FN="${PROJECT_CODE}-${ENVIRONMENT}-cost-guard"
+DRY_RUN="$(aws lambda get-function-configuration --function-name "$GUARD_FN" \
+             --query 'Environment.Variables.DRY_RUN' --output text 2>/dev/null || echo missing)"
+case "$DRY_RUN" in
+  false)   ok "kill switch ${GUARD_FN} is ARMED" ;;
+  missing) err "kill switch ${GUARD_FN} not found - apply infra/terraform/envs/cost-guard" ;;
+  *)       warn "kill switch ${GUARD_FN} is in DRY RUN - it reports but will not stop anything" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 2. What is running billable right now
@@ -44,7 +64,7 @@ RUNNING=0
 TASKS="$(aws ecs list-tasks --cluster "${PROJECT_CODE}-${ENVIRONMENT}" \
           --query 'length(taskArns)' --output text 2>/dev/null || echo 0)"
 if [ "${TASKS:-0}" != "0" ] && [ "${TASKS}" != "None" ]; then
-  warn "ECS tasks running: ${TASKS}  (~\$0.049/hr each)"
+  warn "ECS tasks running: ${TASKS}  (~\$0.059/hr each, incl. public IPv4)"
   RUNNING=1
 fi
 
@@ -53,7 +73,7 @@ LBS="$(aws elbv2 describe-load-balancers \
         --query "length(LoadBalancers[?starts_with(LoadBalancerName, '${PROJECT_CODE}-${ENVIRONMENT}')])" \
         --output text 2>/dev/null || echo 0)"
 if [ "${LBS:-0}" != "0" ] && [ "${LBS}" != "None" ]; then
-  warn "Load balancers running: ${LBS}  (~\$0.023/hr each)"
+  warn "Load balancers running: ${LBS}  (~\$0.033/hr each, incl. 2 public IPv4)"
   RUNNING=1
 fi
 
@@ -67,13 +87,32 @@ if [ "${NATS:-0}" != "0" ] && [ "${NATS}" != "None" ]; then
   RUNNING=1
 fi
 
-# RDS - should ALWAYS be zero in this project
-DBS="$(aws rds describe-db-instances \
-        --query "length(DBInstances[?starts_with(DBInstanceIdentifier, '${PROJECT_CODE}')])" \
+# RDS - exactly one small instance, part of the ephemeral dev stack
+DB_STATUS="$(db_instance_status)"
+case "$DB_STATUS" in
+  "") ;;
+  stopped)
+    warn "RDS ${DB_INSTANCE_ID}: stopped  (storage still ~\$0.003/hr; AWS restarts a stopped instance after 7 days)"
+    RUNNING=1 ;;
+  *)
+    warn "RDS ${DB_INSTANCE_ID}: ${DB_STATUS}  (~\$0.019/hr: db.t4g.micro + 20 GB gp3)"
+    RUNNING=1 ;;
+esac
+
+# Any OTHER project database would be a mistake - only one is ever provisioned.
+OTHER_DBS="$(aws rds describe-db-instances \
+        --query "length(DBInstances[?starts_with(DBInstanceIdentifier, '${PROJECT_CODE}') && DBInstanceIdentifier != '${DB_INSTANCE_ID}'])" \
         --output text 2>/dev/null || echo 0)"
-if [ "${DBS:-0}" != "0" ] && [ "${DBS}" != "None" ]; then
-  err "RDS instances found: ${DBS}. This project uses a Postgres CONTAINER, not RDS."
+if [ "${OTHER_DBS:-0}" != "0" ] && [ "${OTHER_DBS}" != "None" ]; then
+  err "unexpected RDS instances: ${OTHER_DBS}. Only ${DB_INSTANCE_ID} belongs to this project."
   RUNNING=1
+fi
+
+# Snapshots kept between sessions (not billable compute, a few cents of storage)
+SNAPS="$(aws rds describe-db-snapshots --db-instance-identifier "$DB_INSTANCE_ID" --snapshot-type manual \
+          --query 'length(DBSnapshots)' --output text 2>/dev/null | tr -d '\r' || echo 0)"
+if [ "${SNAPS:-0}" != "0" ] && [ "${SNAPS}" != "None" ]; then
+  log "RDS snapshots kept: ${SNAPS} (newest is restored on the next deploy; ~\$0.095/GB-month of data)"
 fi
 
 if [ "$RUNNING" = "0" ]; then

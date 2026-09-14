@@ -1,0 +1,99 @@
+{
+  "name": "ekba-golden-set-v1",
+  "description": "Fixed evaluation questions with known answers and expected source documents. Kept deliberately small so the suite can run repeatedly without burning the $20 budget.",
+  "tenant": "seed-tenant-northwind",
+  "cases": [
+    {
+      "id": "fin-001",
+      "department": "finance",
+      "question": "What is the domestic hotel reimbursement limit?",
+      "expected_document_ids": ["seed-doc-travel-2026"],
+      "expected_answer_contains": ["150"],
+      "must_not_contain": ["I could not find"],
+      "answerable": true
+    },
+    {
+      "id": "fin-002",
+      "department": "finance",
+      "question": "What is the daily meal allowance for domestic travel?",
+      "expected_document_ids": ["seed-doc-travel-2026"],
+      "expected_answer_contains": ["60"],
+      "must_not_contain": [],
+      "answerable": true
+    },
+    {
+      "id": "fin-003",
+      "department": "finance",
+      "question": "Above what amount are receipts required?",
+      "expected_document_ids": ["seed-doc-travel-2026"],
+      "expected_answer_contains": ["25"],
+      "must_not_contain": [],
+      "answerable": true
+    },
+    {
+      "id": "hr-001",
+      "department": "hr",
+      "question": "How much annual leave carries over into the next year?",
+      "expected_document_ids": ["seed-doc-leave"],
+      "expected_answer_contains": ["5"],
+      "must_not_contain": [],
+      "answerable": true
+    },
+    {
+      "id": "hr-002",
+      "department": "hr",
+      "question": "What equipment is issued to a new starter on day one?",
+      "expected_document_ids": ["seed-doc-onboarding"],
+      "expected_answer_contains": ["laptop"],
+      "must_not_contain": [],
+      "answerable": true
+    },
+    {
+      "id": "legal-001",
+      "department": "legal",
+      "question": "How long does the standard NDA remain in force?",
+      "expected_document_ids": ["seed-doc-nda"],
+      "expected_answer_contains": ["three", "3"],
+      "must_not_contain": [],
+      "answerable": true
+    },
+    {
+      "id": "tech-001",
+      "department": "technical",
+      "question": "Who is paged first for a severity one incident?",
+      "expected_document_ids": ["seed-doc-security"],
+      "expected_answer_contains": ["on-call"],
+      "must_not_contain": [],
+      "answerable": true
+    },
+    {
+      "id": "ops-001",
+      "department": "operations",
+      "question": "What personal protective equipment is required in the warehouse?",
+      "expected_document_ids": ["seed-doc-warehouse"],
+      "expected_answer_contains": ["boots"],
+      "must_not_contain": [],
+      "answerable": true
+    },
+    {
+      "id": "neg-001",
+      "department": null,
+      "question": "What is the company policy on interplanetary travel to Mars?",
+      "expected_document_ids": [],
+      "expected_answer_contains": [],
+      "must_not_contain": [],
+      "answerable": false,
+      "note": "Refusal case. The system must say it cannot find this rather than inventing a policy."
+    },
+    {
+      "id": "neg-002",
+      "department": null,
+      "question": "What was our exact revenue in fiscal year 1997?",
+      "expected_document_ids": [],
+      "expected_answer_contains": [],
+      "must_not_contain": [],
+      "answerable": false,
+      "note": "Refusal case. No such document exists in the corpus."
+    }
+  ]
+}

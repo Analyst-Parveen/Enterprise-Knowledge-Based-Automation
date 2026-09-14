@@ -3,8 +3,9 @@
 #
 #   docker compose -f infra/docker/docker-compose.yml up -d
 #
-# Data services are containers here AND in the AWS demo - no RDS, no
-# ElastiCache. See .claude/rules/aws-infrastructure.md section 5.
+# Data services are containers here, at $0. In the AWS demo Qdrant and Redis
+# are containers too, and PostgreSQL is a small RDS instance (same major
+# version, 16). See .claude/rules/aws-infrastructure.md section 5.
 
 name: ekba-dev
 
@@ -108,6 +109,17 @@ services:
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     volumes:
       - ../../backend:/app:ro
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infra/docker/frontend.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
 
 volumes:
   postgres_data:

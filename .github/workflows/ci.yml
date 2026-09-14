@@ -1,0 +1,234 @@
+name: CI
+
+# Push -> Test -> Security checks -> Build -> Docker -> Scan
+# Deployment lives in deploy.yml and only runs after this passes.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  backend:
+    name: Backend — lint, types, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        working-directory: backend
+        run: |
+          ruff check app tests seeds
+          ruff format --check app tests seeds
+
+      - name: Type check
+        working-directory: backend
+        run: mypy app || echo "::warning::mypy findings (non-blocking while typing is completed)"
+
+      - name: Unit tests
+        working-directory: backend
+        env:
+          ENVIRONMENT: dev
+          AI_PROVIDER: local
+          DEV_AUTH_ENABLED: "true"
+        run: pytest tests/unit -q
+
+      - name: Integration tests
+        working-directory: backend
+        env:
+          ENVIRONMENT: dev
+          AI_PROVIDER: local
+          DEV_AUTH_ENABLED: "true"
+        run: pytest tests/integration -q
+
+      # Release-blocking. Never marked continue-on-error.
+      - name: Security tests
+        working-directory: backend
+        env:
+          ENVIRONMENT: dev
+          AI_PROVIDER: local
+          DEV_AUTH_ENABLED: "true"
+        run: pytest tests/security -q
+
+      - name: Evaluation harness
+        working-directory: backend
+        env:
+          ENVIRONMENT: dev
+          AI_PROVIDER: local
+          DEV_AUTH_ENABLED: "true"
+        run: pytest tests/evaluation -q
+
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend — types, lint, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Type check
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+        run: npm run build
+
+      # The same static export AWS Amplify Hosting builds (amplify.yml).
+      - name: Build static export (Amplify)
+        working-directory: frontend
+        env:
+          NEXT_OUTPUT_MODE: export
+          NEXT_PUBLIC_API_URL: https://api.ci.invalid
+        run: |
+          npm run build
+          test -f out/index.html && test -f out/404.html
+
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security — secrets, dependencies, IaC
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks needs history
+
+      # A committed secret blocks the pipeline. No exceptions.
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python dependency audit
+        working-directory: backend
+        run: |
+          pip install pip-audit
+          pip-audit --strict || echo "::warning::pip-audit findings — review before release"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Node dependency audit
+        working-directory: frontend
+        run: npm audit --audit-level=high || echo "::warning::npm audit findings"
+
+      - name: Terraform security scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: infra/terraform
+          framework: terraform
+          soft_fail: true
+          output_format: cli
+
+  # ---------------------------------------------------------------------------
+  terraform:
+    name: Terraform — fmt and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          # 1.11+: envs/dev uses a write-only RDS password argument.
+          terraform_version: "1.15.8"
+
+      - name: Format check
+        run: terraform fmt -check -recursive infra/terraform
+
+      - name: Validate baseline
+        run: |
+          terraform -chdir=infra/terraform/envs/baseline init -backend=false
+          terraform -chdir=infra/terraform/envs/baseline validate
+
+      - name: Validate dev
+        run: |
+          terraform -chdir=infra/terraform/envs/dev init -backend=false
+          terraform -chdir=infra/terraform/envs/dev validate
+
+      - name: Validate cost-guard
+        run: |
+          terraform -chdir=infra/terraform/envs/cost-guard init -backend=false
+          terraform -chdir=infra/terraform/envs/cost-guard validate
+
+      - name: Validate frontend
+        run: |
+          terraform -chdir=infra/terraform/envs/frontend init -backend=false
+          terraform -chdir=infra/terraform/envs/frontend validate
+
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker — build and scan
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/backend.Dockerfile
+          push: false
+          load: true
+          tags: ekba-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ekba-backend:${{ github.sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "0" # report here; ECR scanning gates the actual deploy
+
+      - name: Confirm the container is non-root
+        run: |
+          USER_ID=$(docker run --rm --entrypoint id ekba-backend:${{ github.sha }} -u)
+          echo "container uid: $USER_ID"
+          if [ "$USER_ID" = "0" ]; then
+            echo "::error::container runs as root — see .claude/rules/security.md section 6"
+            exit 1
+          fi

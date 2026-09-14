@@ -1,0 +1,39 @@
+# Copy to terraform.tfvars and fill in. NEVER commit terraform.tfvars.
+
+expected_aws_account_id = "123456789012"
+aws_region              = "us-west-2"
+environment             = "dev"
+
+# Your own IP only. Terraform REFUSES 0.0.0.0/0 here.
+#   curl -s https://checkip.amazonaws.com
+# Home IPs change. When yours does, the ALB drops your requests and verify.sh
+# fails with a timeout even though the deployment is healthy - update this and
+# run ./scripts/deploy.sh (a one-resource, in-place security-group change).
+#
+# Do not set cloudfront_origin_ingress or amplify_origin here:
+# scripts/deploy-frontend.sh writes them to frontend.auto.tfvars (git-ignored),
+# which Terraform loads automatically.
+allowed_cidrs = ["203.0.113.7/32"]
+
+# From the baseline outputs.
+s3_bucket         = "ekba-dev-documents-a1b2c3d4"
+cognito_client_id = "1example23client45id"
+
+# backend_image is NOT set here. deploy.sh builds the image, pushes it tagged
+# with the git SHA, and passes it with -var. That is also why this environment
+# is applied through ./scripts/deploy.sh rather than a manual terraform apply:
+# the ECS service needs an image that already exists in ECR.
+
+# Verify these exist in YOUR region first:
+#   aws bedrock list-foundation-models --region us-west-2 --query 'modelSummaries[].modelId'
+bedrock_region                 = "us-west-2"
+bedrock_chat_primary_model_id  = "us.amazon.nova-lite-v1:0"
+bedrock_chat_fallback_model_id = "us.amazon.nova-micro-v1:0"
+bedrock_vision_model_id        = "us.amazon.nova-lite-v1:0"
+bedrock_embedding_model_id     = "amazon.titan-embed-text-v2:0"
+bedrock_embedding_dimension    = 1024
+
+# The frontend runs on your machine and calls the ALB, so its origin is
+# localhost:3000. Hosts include the ALB DNS name, which browser traffic carries.
+cors_allowed_origins = "http://localhost:3000"
+trusted_hosts        = "localhost,127.0.0.1,*.elb.amazonaws.com"

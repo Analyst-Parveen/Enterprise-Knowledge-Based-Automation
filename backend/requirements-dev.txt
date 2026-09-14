@@ -1,0 +1,18 @@
+# Development and testing dependencies.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Everything needed to run the 164 tests, the linter and the formatter.
+
+-r requirements.txt
+
+# --- testing ---------------------------------------------------------------
+pytest==9.1.1
+pytest-asyncio==1.4.0
+
+# --- lint, format, types ---------------------------------------------------
+ruff==0.16.6                     # both `ruff check` and `ruff format`
+mypy==1.13.0
+
+# --- security scanning (also run in CI) ------------------------------------
+pip-audit==2.7.3                 # dependency CVE scan

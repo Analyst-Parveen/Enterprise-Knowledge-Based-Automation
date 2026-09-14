@@ -7,11 +7,29 @@
 - **[.claude/skills/](.claude/skills/)** — workflows for deploy, verify, E2E,
   rollback, Terraform, security testing, ingestion, and RAG testing.
 
-## Current status
+## Current status (2026-09-12)
 
-Foundation complete: structure, PROJECT.md, rules, skills, and lifecycle scripts.
-**Phase 0 implementation has not started.** Build phases in order, 0 through 5
-(PROJECT.md section 18).
+Local platform implemented; the last deploy gate passed 279 backend tests and
+the frontend typecheck. Tenant onboarding is implemented end to end: a
+`platform_admin` creates a company and invites its first admin, that admin
+manages users inside its own company only, and sign-in is email + password
+through Cognito (no token pasting). **Phase 5 (AWS) is in progress** — status and
+open items in PROJECT.md section 18, operating detail in
+[RUNBOOK.md](RUNBOOK.md) Part B:
+
+- Account on the AWS **Paid** plan (the Free plan blocks CodeDeploy), `us-west-2`.
+- Four Terraform states: `baseline` and `cost-guard` (protected), `dev` (ephemeral),
+  `frontend` (Amplify + CloudFront, persistent — applied, live).
+- PostgreSQL on AWS is **Amazon RDS** (`ekba-dev-postgres`, `db.t4g.micro`,
+  private subnets, SG from the task SG only), part of the `dev` stack. The
+  Postgres sidecar is gone. Data survives task replacement; `destroy.sh`
+  snapshots it and `deploy.sh` restores the newest snapshot.
+- CodeDeploy blue-green deployments succeed; `verify.sh` passes (health +
+  readiness incl. RDS, RDS posture).
+- Cost guard applied with **`dry_run = true`** (it stops RDS, never deletes it).
+  Never set it to `false` without explicit user approval.
+- Bedrock quotas are 0 in the account — no chat or demo data on AWS yet.
+- `rollback.sh` does not shift traffic yet (placeholder).
 
 ## Non-negotiable safety rules
 
@@ -35,18 +53,36 @@ Foundation complete: structure, PROJECT.md, rules, skills, and lifecycle scripts
   filters every query, retrieval, cache key, S3 prefix, and agent node. A
   cross-tenant leak is total product failure.
   See [tenant-isolation.md](.claude/rules/tenant-isolation.md).
+- **The onboarding hierarchy.** Three roles: `platform_admin` (the service
+  provider, in the reserved `platform` tenant) creates companies and invites each
+  company's first `admin`; that `admin` manages users **inside its own company
+  only** and may assign only `user` or `admin`; `user` manages nothing. No API
+  grants `platform_admin` — `scripts/bootstrap-platform-admin.sh` does, out of
+  band. The platform role and the `platform` tenant imply each other at token
+  verification, so tenant filtering has no exceptions. The single sanctioned
+  cross-tenant surface is `app/db/control_plane.py`: registry data only, behind
+  `PlatformAdminUser`, every mutation audited. See
+  [security.md](.claude/rules/security.md) section 2.
+- **Passwords are Cognito's business.** The app never sets, stores, logs or
+  returns one. Accounts are invitation-only: Cognito emails a one-time password
+  and the invitee replaces it on first sign-in. A failed sign-in gives one
+  generic message, and forgot-password always returns 202 — anything else is
+  account enumeration.
 - **Guardrails are pipeline stages**, not optional. No stage is skipped for speed,
   and a cache hit never bypasses auth, tenant filtering, or the output guardrail.
 - **Bedrock only, for both chat and embeddings.** GPT-4 is *not* on Bedrock —
   only OpenAI's open-weight `gpt-oss` models are, and they are text-only. Vision
   uses `amazon.nova-lite-v1:0`; embeddings use `amazon.titan-embed-text-v2:0`.
   Nothing but the configured embedding model ever produces embeddings.
-- **Cost: $20 hard ceiling** (not $140). Local Docker Compose for all development
-  at $0. AWS only for demos, at ~$0.30/session. **No NAT Gateway, no RDS, no
-  ElastiCache, no EKS, no EFS — those resources must not appear in the Terraform
-  at all.** Postgres, Qdrant, and Redis run as containers and are re-seeded on
-  every deploy. The environment is ephemeral:
-  `setup -> test -> demo -> DESTROY -> setup again`.
+- **Cost: $20 hard ceiling**, measured gross of credits (credits pay first, but
+  a ceiling measured after credits reads $0 until they run out). Local Docker
+  Compose for all development at $0. AWS only for demos, at ~$0.11/hour. **No NAT
+  Gateway, no ElastiCache, no EKS, no EFS — those resources must not appear in
+  the Terraform at all.** Exactly **one** RDS instance (`modules/database`,
+  `db.t4g.micro`, single-AZ, private, write-only password) lives in the ephemeral
+  `dev` stack; ~$14/month if it ever ran 24/7, so it must not. Qdrant and Redis
+  run as containers and are re-seeded on every deploy. The environment is
+  ephemeral: `setup -> test -> demo -> DESTROY (snapshot DB) -> setup again`.
 - **`destroy.sh` is the normal end of a session**, not an emergency measure.
   Before any action that leaves something billable running, say so explicitly.
 
@@ -63,18 +99,37 @@ Foundation complete: structure, PROJECT.md, rules, skills, and lifecycle scripts
 ## Lifecycle
 
 ```bash
-./scripts/cost-check.sh  # spend + what is running billable (read-only)
-./scripts/deploy.sh      # refuses past the $20 ceiling
+./scripts/cost-check.sh  # gross/credits/net spend, what is running, kill-switch state (read-only)
+./scripts/deploy.sh      # refuses at $18 gross usage; ends with verify.sh
 ./scripts/verify.sh
-./scripts/seed.sh
-./scripts/test-e2e.sh
-./scripts/rollback.sh    # application-level only, never destroys
-./scripts/destroy.sh     # the ONLY sanctioned terraform destroy path
+./scripts/seed.sh        # local stack only; on AWS the task seeds itself
+./scripts/test-e2e.sh    # local stack only
+./scripts/rollback.sh    # application-level only, never destroys (traffic shift not built yet)
+./scripts/destroy.sh     # snapshots RDS, then the ONLY sanctioned terraform destroy path
+
+./scripts/deploy-frontend.sh [--plan-only]   # Amplify frontend + CloudFront API + backend wiring + verify
+./scripts/rollback-frontend.sh [--to <sha>]  # rebuild an earlier frontend commit (app-level only)
+
+./scripts/bootstrap-platform-admin.sh --email ops@you.com [--dry-run]
+                         # the first platform operator, straight into Cognito.
+                         # Idempotent, never deletes, sets no password.
 ```
+
+The frontend reaches the API through CloudFront (HTTPS) because the ALB is
+HTTP-only. Never add the Amplify origin or CloudFront ingress to
+`envs/dev/terraform.tfvars` by hand — `deploy-frontend.sh` owns them in
+`envs/dev/frontend.auto.tfvars`.
 
 Settings come from `.env` (see `.env.example`). `EXPECTED_AWS_ACCOUNT_ID`,
 `EXPECTED_AWS_REGION`, and `AWS_REGION` are mandatory — scripts refuse to touch
-AWS without them.
+AWS without them; if unset, they default from the git-ignored
+`infra/terraform/envs/baseline/terraform.tfvars`.
+
+**Before any AWS deploy or verify, check the operator IP.** The ALB admits only
+`allowed_cidrs` in `infra/terraform/envs/dev/terraform.tfvars` (one `/32`). A
+changed home IP makes `verify.sh` fail with a timeout while the deployment itself
+is healthy — confirm with ALB target health and the app logs before touching
+application code.
 
 ## Phases
 

@@ -91,3 +91,6 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Terraform backend config - written by scripts/bootstrap-state.sh, holds the account ID
+backend.hcl

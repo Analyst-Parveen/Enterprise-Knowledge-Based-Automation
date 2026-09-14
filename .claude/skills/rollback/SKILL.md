@@ -49,19 +49,41 @@ corrupt data. Do not improvise a down-migration.
 ./scripts/rollback.sh
 ```
 
-The script shifts CodeDeploy traffic back to the previous known-good deployment
-group revision. Confirm the target revision before it executes.
+**Current state (2026-09-11): the script does not shift traffic yet.** Its
+CodeDeploy step prints `CodeDeploy rollback not yet implemented (Phase 5)`; the
+script then re-runs `verify.sh` and writes an incident report. It changes nothing
+in AWS. When it prints `ROLLBACK FAILED - ESCALATE TO A HUMAN`, that means the
+post-rollback `verify.sh` failed — usually for the same reason the deploy's did.
+
+The intended behaviour, and the manual equivalent for a deployment that is still
+in progress (including its rollback window), is the command the GitHub workflow
+uses. It has **not been exercised** in this project — confirm the deployment ID
+with the user and treat the first use as a test:
+
+```bash
+aws deploy stop-deployment --deployment-id "$ID" --auto-rollback-enabled
+```
+
+CodeDeploy's own automatic rollback is configured on `DEPLOYMENT_FAILURE` and on
+the `ekba-dev-5xx` alarm.
+
+Before rolling back at all, confirm the release is actually broken. After the
+first deployment, `verify.sh` failed only because the operator IP had changed —
+the release was healthy and a rollback would have fixed nothing.
 
 ## Step 4 — Confirm recovery
 
 ```bash
 # health checks
-curl -fsS "$API_URL/health"
+curl -fsS "$API_URL/api/v1/health"         # liveness
+curl -fsS "$API_URL/api/v1/health/ready"   # Postgres, Redis, Qdrant (503 if any is down)
 ./scripts/verify.sh
 ```
 
 Verify: API liveness/readiness, database, Qdrant, Redis, and one real RAG smoke
-query returning a complete response envelope.
+query returning a complete response envelope. (The RAG query cannot pass on AWS
+while the account's Bedrock quotas are 0 — say so rather than reporting it as a
+rollback failure.)
 
 If rollback itself fails to restore health, **stop and escalate to the user with
 the evidence.** Do not start destroying or rebuilding infrastructure on your own

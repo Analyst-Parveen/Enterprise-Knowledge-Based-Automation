@@ -1,0 +1,51 @@
+# Runtime dependencies for the Enterprise Knowledge AI backend.
+#
+#   pip install -r requirements.txt
+#
+# Versions are pinned to what this project was actually built and tested
+# against, so a fresh install reproduces a known-good environment.
+# For development and testing, also install requirements-dev.txt.
+
+# --- web framework ---------------------------------------------------------
+fastapi==0.141.1
+uvicorn[standard]==0.52.4        # the ASGI server; [standard] adds --reload
+python-multipart==0.0.32         # required by FastAPI for file uploads
+starlette==1.6.0
+
+# --- configuration and validation ------------------------------------------
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-dotenv==1.2.3             # loads .env
+
+# --- database --------------------------------------------------------------
+SQLAlchemy==2.0.52
+asyncpg==0.31.0                  # async PostgreSQL driver
+alembic==1.19.2                  # migrations: `alembic upgrade head`
+greenlet==3.5.5                  # required by SQLAlchemy async
+
+# --- cache and vector store ------------------------------------------------
+redis==8.1.0
+qdrant-client==1.19.0
+
+# --- AWS: Bedrock, S3, Transcribe, Cognito ---------------------------------
+boto3==1.43.89
+botocore==1.43.89
+
+# --- authentication --------------------------------------------------------
+PyJWT[crypto]==2.13.0            # [crypto] adds RS256 for Cognito JWKS
+cryptography==50.0.1
+
+# --- HTTP client -----------------------------------------------------------
+httpx==0.28.1
+
+# --- agentic workflows -----------------------------------------------------
+langgraph==1.2.11
+langsmith==0.12.2
+
+# --- document extraction ---------------------------------------------------
+# Each is imported lazily inside its extractor, so a missing one only breaks
+# that one file type rather than the whole application.
+pypdf==6.18.0                    # PDF
+python-docx==1.2.0               # DOC / DOCX
+openpyxl==3.1.5                  # XLSX / XLS
+# CSV, TXT and Markdown use the standard library - no dependency needed.

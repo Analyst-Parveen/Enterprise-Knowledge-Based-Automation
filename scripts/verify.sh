@@ -20,6 +20,31 @@ check() {
 
 skip() { warn "SKIP $1 ${2:+- $2}"; }
 
+AWS_MODE=0
+
+# RDS is not publicly accessible and its storage is encrypted.
+rds_private_and_encrypted() {
+  local posture
+  posture="$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE_ID" \
+      --query 'DBInstances[0].[PubliclyAccessible,StorageEncrypted]' --output text | tr -d '\r' | tr '\t' ' ')"
+  [ "$posture" = "False True" ]
+}
+
+# The DB security group admits exactly one source - the task security group -
+# and no CIDR, IPv6 range or prefix list.
+db_sg_locked_down() {
+  local db_sg="${PROJECT_CODE}-${ENVIRONMENT}-db" tasks_sg sources open
+  tasks_sg="$(aws ec2 describe-security-groups \
+      --filters "Name=group-name,Values=${PROJECT_CODE}-${ENVIRONMENT}-tasks" \
+      --query 'SecurityGroups[0].GroupId' --output text | tr -d '\r')"
+  sources="$(aws ec2 describe-security-groups --filters "Name=group-name,Values=${db_sg}" \
+      --query 'SecurityGroups[0].IpPermissions[].UserIdGroupPairs[].GroupId' --output text | tr -d '\r')"
+  open="$(aws ec2 describe-security-groups --filters "Name=group-name,Values=${db_sg}" \
+      --query 'SecurityGroups[0].IpPermissions[].[IpRanges[].CidrIp, Ipv6Ranges[].CidrIpv6, PrefixListIds[].PrefixListId][][]' \
+      --output text | tr -d '\r')"
+  [ -n "$tasks_sg" ] && [ "$sources" = "$tasks_sg" ] && [ -z "$open" ]
+}
+
 log "Verifying ${PROJECT_NAME} [${ENVIRONMENT}] (read-only)"
 
 # ---------------------------------------------------------------------------
@@ -28,6 +53,7 @@ log "Verifying ${PROJECT_NAME} [${ENVIRONMENT}] (read-only)"
 if [ "${VERIFY_AWS:-1}" = "1" ] && command -v aws >/dev/null 2>&1 \
    && [ -n "${EXPECTED_AWS_ACCOUNT_ID:-}" ]; then
   preflight_aws
+  AWS_MODE=1
 
   step "Resource ownership (ProjectCode=${PROJECT_CODE})"
   aws resourcegroupstaggingapi get-resources \
@@ -53,18 +79,29 @@ skip "terraform drift + AWS posture" "Phase 5"
 # 3. Services
 # ---------------------------------------------------------------------------
 step "Services"
-# TODO(phase-1): PostgreSQL reachable + migrations at head
-#                Qdrant reachable + collection dimension matches embedding model
-#                Redis reachable (cache + rate limiting)
-#                containers running non-root at expected image SHA
-skip "PostgreSQL / Qdrant / Redis" "Phase 1"
+if command -v curl >/dev/null 2>&1; then
+  # /health/ready runs SELECT 1 on PostgreSQL and pings Redis and Qdrant; any
+  # failure turns it into a 503. On AWS this is the backend -> RDS check.
+  check "readiness: PostgreSQL + Redis + Qdrant (${API_URL}/api/v1/health/ready)" \
+    curl -fsS --max-time 15 "${API_URL}/api/v1/health/ready" || true
+else
+  skip "readiness endpoint" "curl unavailable"
+fi
+
+if [ "$AWS_MODE" = "1" ]; then
+  check "RDS ${DB_INSTANCE_ID} is available" test "$(db_instance_status)" = "available" || true
+  check "RDS is private (not publicly accessible) and encrypted at rest" rds_private_and_encrypted || true
+  check "RDS security group admits only the backend task security group" db_sg_locked_down || true
+fi
+# TODO(phase-1): migrations at head, Qdrant collection dimension matches the
+#                embedding model, containers running non-root at the image SHA
 
 # ---------------------------------------------------------------------------
 # 4. Application
 # ---------------------------------------------------------------------------
 step "Application"
 if command -v curl >/dev/null 2>&1; then
-  check "health endpoint (${API_URL}/health)" curl -fsS --max-time 10 "${API_URL}/health" || true
+  check "health endpoint (${API_URL}/api/v1/health)" curl -fsS --max-time 10 "${API_URL}/api/v1/health" || true
 else
   skip "health endpoint" "curl unavailable"
 fi

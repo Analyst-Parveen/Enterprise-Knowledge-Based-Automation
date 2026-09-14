@@ -20,6 +20,30 @@ leak is a total failure of the product, regardless of how well anything else wor
   metrics, not other tenants' documents. Any genuine cross-tenant admin view must
   be an explicitly separate, explicitly audited endpoint.
 
+### The one sanctioned cross-tenant surface
+
+The service provider has to be able to create a customer account, so exactly one
+cross-tenant surface exists. It is narrow by construction:
+
+- It lives in **one module**, `app/db/control_plane.py`, kept separate from
+  `repositories.py` so that module keeps its "every function is tenant-filtered"
+  contract with no exceptions to remember.
+- Every function in it sits behind the `PlatformAdminUser` dependency.
+- It returns **registry data only** — company name, id, contact, seat counts.
+  There is no function there that can reach a document, a chunk, a conversation,
+  a message, a citation or a cached answer, and adding one would be a violation
+  of this rule rather than a feature.
+- Every mutation records an audit event, filed under the **target** tenant so the
+  company's own admin can see what was done to its account.
+- The onboarding trail (`GET /platform/audit`) is restricted by event-type prefix
+  to `tenant.%`, `user.%` and `platform.%`, so it cannot widen into a window onto
+  a company's activity.
+
+`platform_admin` therefore does not weaken the invariant: the platform role lives
+in its own reserved tenant (`platform`), which holds operators and nothing else,
+and the role and that tenant imply each other at token-verification time. Every
+tenant-data path is still tenant-filtered for every role, including this one.
+
 ## 3. Database layer
 
 - Every table holding tenant data has a non-nullable `tenant_id` column with an
@@ -82,4 +106,22 @@ feature is considered complete:
 5. An admin of tenant A cannot read documents of tenant B.
 6. Deleting a document requires ownership or authorized admin, and is audited.
 
-Any change to retrieval, caching, agents, or storage must run these tests.
+The onboarding hierarchy adds these, in
+`backend/tests/security/test_onboarding_hierarchy.py`,
+`backend/tests/integration/test_onboarding_api.py` and the journey in
+`backend/tests/e2e/test_onboarding_flow.py`:
+
+7. A tenant admin cannot create a company, by any route or payload.
+8. A tenant admin cannot create or assign `platform_admin`, and a request body
+   asking for it is rejected by the schema before any handler runs.
+9. A tenant admin of A cannot read, patch or reset the password of a user in B —
+   the attempt raises a tenant-isolation error and is recorded as critical.
+10. Admins of two companies cannot see each other's users at all.
+11. A token claiming `platform_admin` in a normal tenant, or a normal role in the
+    `platform` tenant, is rejected at verification with a critical event.
+12. A plain user cannot reach any admin or platform route.
+13. A tenant admin cannot remove the company's last active administrator, and
+    cannot change its own role or status.
+
+Any change to retrieval, caching, agents, storage, or the role hierarchy must run
+these tests.

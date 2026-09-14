@@ -17,20 +17,44 @@ from configuration:
 
 | Role | Default model ID | Constraint |
 |---|---|---|
-| `chat.primary` | `openai.gpt-oss-20b-1:0` | Text-only; limited regions |
-| `chat.fallback` | `amazon.nova-lite-v1:0` | Cheaper, wider availability |
-| `vision` | `amazon.nova-lite-v1:0` | Image + video understanding |
-| `embedding` | `amazon.titan-embed-text-v2:0` | 1024 dimensions |
+| `chat.primary` | `us.amazon.nova-lite-v1:0` | Needs an inference profile |
+| `chat.fallback` | `us.amazon.nova-micro-v1:0` | Cheaper, **text-only** |
+| `vision` | `us.amazon.nova-lite-v1:0` | Image understanding |
+| `embedding` | `amazon.titan-embed-text-v2:0` | 1024 dims, **no prefix** |
+
+**Inference profiles.** Amazon Nova cannot be invoked by bare model ID. The ID
+must carry a region-group prefix — `us.`, `eu.`, `apac.` or `global.` — or
+Bedrock returns:
+
+```
+ValidationException: Invocation of model ID amazon.nova-lite-v1:0 with
+on-demand throughput isn't supported. Retry your request with the ID or ARN
+of an inference profile that contains this model.
+```
+
+Titan embeddings are the opposite: direct invoke, no prefix. `registry.py`
+strips the prefix before pricing and vision lookups, so both forms work.
 
 ## 3. Facts that constrain model choice
 
 State these correctly; do not repeat the common mistakes:
 
 - **GPT-4 is not available on Amazon Bedrock.** Proprietary OpenAI models live on
-  the OpenAI API and Azure OpenAI. Bedrock hosts only OpenAI's *open-weight*
-  `gpt-oss` family.
-- **`openai.gpt-oss-*` models are text-only.** Never route an image, diagram,
-  table screenshot, or video frame to them. Vision goes to Nova Lite.
+  the OpenAI API and Azure OpenAI.
+- **Model availability is per-region and changes over time.** As of the last
+  check, `us-west-2` offered no `gpt-oss` models at all — the OpenAI entries
+  there were `us.openai.gpt-5.6-*` and `us.openai.gpt-6-astra`. Verify before
+  depending on any specific ID:
+
+  ```bash
+  aws bedrock list-inference-profiles --region $AWS_REGION
+  aws bedrock list-foundation-models  --region $AWS_REGION
+  ```
+
+- **Never route an image to a text-only model.** `nova-micro`, `titan-embed` and
+  the `gpt-oss` family cannot accept images. Vision goes to Nova Lite. Both
+  `registry.validate_vision_routing()` and a Terraform variable validation
+  enforce this.
 - **OpenAI embedding models are not on Bedrock.** Embeddings use Titan v2.
 - **Gemini 2.5 Flash is not on Bedrock** — it is a Google Vertex AI model. It is
   not used in this project, and it would never be an embedding model regardless.

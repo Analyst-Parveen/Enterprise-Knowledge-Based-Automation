@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Response
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.api.deps import CurrentUser, DbSession
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.core.ratelimit import get_redis
+from app.db.models import Tenant
 from app.schemas import ComponentHealth, HealthResponse, MeResponse
+
+logger = get_logger(__name__)
 
 router = APIRouter(tags=["health"])
 
@@ -63,6 +67,25 @@ async def readiness(session: DbSession, response: Response) -> HealthResponse:
 
 
 @router.get("/me", response_model=MeResponse)
-async def me(ctx: CurrentUser) -> MeResponse:
-    """Echo the verified principal - useful for debugging tenant binding."""
-    return MeResponse(user_id=ctx.user_id, tenant_id=ctx.tenant_id, role=ctx.role, email=ctx.email)
+async def me(ctx: CurrentUser, session: DbSession) -> MeResponse:
+    """Echo the verified principal - useful for debugging tenant binding.
+
+    The company name is looked up for the UI, best-effort: this endpoint decides
+    whether the whole app is usable, so a database blip must not turn a valid
+    session into a sign-out.
+    """
+    tenant_name: str | None = None
+    try:
+        tenant_name = (
+            await session.execute(select(Tenant.name).where(Tenant.id == ctx.tenant_id))
+        ).scalar_one_or_none()
+    except Exception as exc:  # noqa: BLE001 - the principal is still valid
+        logger.warning("tenant_name_lookup_failed", extra={"extra": {"error": type(exc).__name__}})
+
+    return MeResponse(
+        user_id=ctx.user_id,
+        tenant_id=ctx.tenant_id,
+        role=ctx.role,
+        email=ctx.email,
+        tenant_name=tenant_name,
+    )

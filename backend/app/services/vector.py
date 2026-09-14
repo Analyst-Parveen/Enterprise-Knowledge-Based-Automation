@@ -107,7 +107,7 @@ async def ensure_collection() -> None:
     The tenant_id index is not optional - it is what makes the mandatory filter
     fast enough that nobody is ever tempted to drop it.
     """
-    dim = settings.bedrock_embedding_dimension
+    dim = settings.embedding_dimension
     name = settings.qdrant_collection
 
     def _ensure() -> None:
@@ -134,6 +134,8 @@ async def ensure_collection() -> None:
             ("document_id", qm.PayloadSchemaType.KEYWORD),
             ("owner_id", qm.PayloadSchemaType.KEYWORD),
             ("department", qm.PayloadSchemaType.KEYWORD),
+            # Qdrant Cloud requires an index for filtered bool fields.
+            ("suspicious", qm.PayloadSchemaType.BOOL),
         ):
             try:
                 client.create_payload_index(
@@ -220,19 +222,26 @@ async def search(
     query_filter = _tenant_filter(ctx, document_ids=document_ids, department=department)
 
     def _search() -> list[Any]:
-        return get_client().search(
+        # query_points, not the removed search(): qdrant-client dropped
+        # QdrantClient.search() in 1.19. query_points returns a QueryResponse
+        # whose .points hold the scored hits.
+        response = get_client().query_points(
             collection_name=settings.qdrant_collection,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=query_filter,
             limit=limit,
             score_threshold=score_threshold,
             with_payload=True,
         )
+        return list(response.points)
 
     try:
         results = await asyncio.to_thread(_search)
     except Exception as exc:  # noqa: BLE001
-        logger.error("qdrant_search_failed", extra={"extra": {"error": type(exc).__name__}})
+        logger.error(
+            "qdrant_search_failed",
+            extra={"extra": {"error": type(exc).__name__, "detail": str(exc)[:200]}},
+        )
         raise UpstreamError("The vector store is unavailable.") from exc
 
     hits = [SearchHit(score=float(r.score), payload=dict(r.payload or {})) for r in results]

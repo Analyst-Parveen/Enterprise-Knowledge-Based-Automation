@@ -22,6 +22,23 @@ export TF_DIR="${REPO_ROOT}/infra/terraform/envs/${ENVIRONMENT}"
 export REPORT_DIR="${REPO_ROOT}/docs/reports"
 export RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 
+# Windows: the AWS CLI installer does not always reach Git Bash's PATH.
+if ! command -v aws >/dev/null 2>&1 && [ -x "/c/Program Files/Amazon/AWSCLIV2/aws.exe" ]; then
+  export PATH="$PATH:/c/Program Files/Amazon/AWSCLIV2"
+fi
+
+# Default the AWS identity from the operator's own (git-ignored) baseline
+# tfvars, so the same values are not typed twice. An explicit export still wins,
+# and preflight_aws still refuses to run if the connected account differs.
+_BASELINE_TFVARS="${REPO_ROOT}/infra/terraform/envs/baseline/terraform.tfvars"
+_tfvar() {
+  [ -f "$_BASELINE_TFVARS" ] || return 0
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$_BASELINE_TFVARS" | head -1
+}
+export EXPECTED_AWS_ACCOUNT_ID="${EXPECTED_AWS_ACCOUNT_ID:-$(_tfvar expected_aws_account_id)}"
+export AWS_REGION="${AWS_REGION:-$(_tfvar aws_region)}"
+export EXPECTED_AWS_REGION="${EXPECTED_AWS_REGION:-${AWS_REGION}}"
+
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
@@ -84,15 +101,28 @@ preflight_terraform() {
   require_cmd terraform
   [ -d "$TF_DIR" ] || die "terraform environment directory not found: ${TF_DIR}"
 
-  terraform -chdir="$TF_DIR" init -input=false -backend=true >/dev/null \
+  [ -f "${TF_DIR}/backend.hcl" ] \
+    || die "no backend.hcl in ${TF_DIR} - run ./scripts/bootstrap-state.sh first"
+  terraform -chdir="$TF_DIR" init -input=false -backend-config=backend.hcl >/dev/null \
     || die "terraform init failed"
 
   local ws
   ws="$(terraform -chdir="$TF_DIR" workspace show)"
   ok "terraform workspace: ${ws}"
 
-  local count
-  count="$(terraform -chdir="$TF_DIR" state list 2>/dev/null | wc -l | tr -d ' ')"
+  # `terraform state list` exits 1 with "No state file was found!" before the
+  # first apply. Under `set -euo pipefail` that used to kill the script silently
+  # here, so a first deploy could never start. An empty state is expected and
+  # reported as 0; any OTHER failure is still fatal and shown.
+  local count state_out
+  if state_out="$(terraform -chdir="$TF_DIR" state list 2>&1)"; then
+    count="$(printf '%s\n' "$state_out" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+  elif printf '%s' "$state_out" | grep -q "No state file was found"; then
+    count=0
+  else
+    err "$state_out"
+    die "could not read terraform state for ${ENVIRONMENT}"
+  fi
   ok "terraform state holds ${count} resources for ${ENVIRONMENT}"
 }
 
@@ -151,59 +181,109 @@ report_header() {
 }
 
 # ---------------------------------------------------------------------------
-# COST GUARD - $20 hard ceiling.
+# COST GUARD - $20 hard ceiling, measured GROSS of credits.
 #
-# Reads month-to-date spend from Cost Explorer and refuses to deploy once the
-# ceiling is crossed. See .claude/rules/aws-infrastructure.md section 5.
+# Spend is read with credits and refunds excluded. With credits netted in, the
+# account reads $0 for as long as credits last, so a net-spend guard could
+# never block anything in time. The same threshold drives the cost-guard
+# Lambda (infra/terraform/envs/cost-guard), so deploy refuses exactly where the
+# kill switch acts. See .claude/rules/aws-infrastructure.md section 5.
 #
 # Note: ce:GetCostAndUsage costs $0.01 per request. Called once per deploy.
 # ---------------------------------------------------------------------------
 MAX_MONTHLY_SPEND_USD="${MAX_MONTHLY_SPEND_USD:-20}"
+COST_GUARD_START="${COST_GUARD_START:-2026-09-01}"
+COST_GUARD_SHUTDOWN_USD="${COST_GUARD_SHUTDOWN_USD:-18}"
 
-month_to_date_spend() {
-  local start end
-  start="$(date -u +%Y-%m-01)"
-  end="$(date -u +%Y-%m-%d)"
-  [ "$start" = "$end" ] && end="$(date -u -d '+1 day' +%Y-%m-%d 2>/dev/null || echo "$end")"
-
+# ce_total FILTER_JSON - sum of UnblendedCost from COST_GUARD_START to today.
+ce_total() {
+  local end
+  end="$(date -u -d '+1 day' +%Y-%m-%d 2>/dev/null || date -u +%Y-%m-%d)"
   aws ce get-cost-and-usage \
-      --time-period "Start=${start},End=${end}" \
+      --time-period "Start=${COST_GUARD_START},End=${end}" \
       --granularity MONTHLY --metrics UnblendedCost \
-      --query 'ResultsByTime[0].Total.UnblendedCost.Amount' \
-      --output text 2>/dev/null || echo "unknown"
+      --filter "$1" \
+      --query 'ResultsByTime[].Total.UnblendedCost.Amount' \
+      --output text 2>/dev/null \
+    | awk '{for (i = 1; i <= NF; i++) s += $i} END {if (NR) printf "%.2f", s; else print "unknown"}' \
+    || true  # awk already printed "unknown" when the call failed; do not die under set -e
+}
+
+# Usage + tax, i.e. what the environment consumed before credits paid for it.
+gross_usage_since_start() {
+  ce_total '{"Not":{"Dimensions":{"Key":"RECORD_TYPE","Values":["Credit","Refund"]}}}'
+}
+
+# Credits applied (a negative number).
+credits_since_start() {
+  ce_total '{"Dimensions":{"Key":"RECORD_TYPE","Values":["Credit"]}}'
 }
 
 assert_within_budget() {
-  step "Cost guard (ceiling: \$${MAX_MONTHLY_SPEND_USD})"
+  step "Cost guard (auto-shutdown at \$${COST_GUARD_SHUTDOWN_USD} gross usage since ${COST_GUARD_START})"
   command -v aws >/dev/null 2>&1 || { warn "aws CLI unavailable - cost guard skipped"; return 0; }
 
   local spend
-  spend="$(month_to_date_spend)"
+  spend="$(gross_usage_since_start)"
 
   if [ "$spend" = "unknown" ] || [ -z "$spend" ]; then
-    warn "could not read month-to-date spend (Cost Explorer may not be enabled)"
+    warn "could not read usage (Cost Explorer may not be enabled)"
     warn "proceeding - but verify spend manually in the Billing console"
     return 0
   fi
 
   local over
-  over="$(awk -v s="$spend" -v m="$MAX_MONTHLY_SPEND_USD" 'BEGIN{print (s+0 >= m+0) ? 1 : 0}')"
+  over="$(awk -v s="$spend" -v m="$COST_GUARD_SHUTDOWN_USD" 'BEGIN{print (s+0 >= m+0) ? 1 : 0}')"
 
   if [ "$over" = "1" ]; then
-    err "month-to-date spend is \$${spend}, ceiling is \$${MAX_MONTHLY_SPEND_USD}"
+    err "gross usage is \$${spend}, the auto-shutdown threshold is \$${COST_GUARD_SHUTDOWN_USD}"
     die "REFUSING TO DEPLOY. Run scripts/destroy.sh and review spend in the Billing console."
   fi
 
-  ok "month-to-date spend \$${spend} of \$${MAX_MONTHLY_SPEND_USD}"
+  ok "gross usage \$${spend} of \$${COST_GUARD_SHUTDOWN_USD} (credits excluded)"
 }
 
 # Print what is running billable right now, and the reminder to destroy.
 cost_reminder() {
   printf '\n%s---------------------------------------------------------------%s\n' "$C_YEL" "$C_RST"
-  printf '%s  Estimated burn: ~$0.072/hour  (ALB + 1 Fargate task)%s\n' "$C_YEL" "$C_RST"
-  printf '%s  A 4-hour demo costs about $0.30.%s\n' "$C_YEL" "$C_RST"
+  printf '%s  Estimated burn: ~$0.11/hour  (Fargate + ALB + 3 public IPv4 + RDS db.t4g.micro)%s\n' "$C_YEL" "$C_RST"
+  printf '%s  A 4-hour demo costs about $0.44. Auto-stop after 8h only once the cost guard is armed.%s\n' "$C_YEL" "$C_RST"
   printf '%s  RUN ./scripts/destroy.sh WHEN THE DEMO ENDS - idle time is wasted budget.%s\n' "$C_YEL" "$C_RST"
   printf '%s---------------------------------------------------------------%s\n\n' "$C_YEL" "$C_RST"
+}
+
+# ---------------------------------------------------------------------------
+# RDS. The instance belongs to the ephemeral stack; its DATA outlives a
+# destroy as a manual snapshot (destroy.sh takes it, deploy.sh restores it).
+# ---------------------------------------------------------------------------
+export DB_INSTANCE_ID="${PROJECT_CODE}-${ENVIRONMENT}-postgres"
+
+# db_instance_status - the instance status, or nothing when it does not exist.
+# Any other error is fatal: guessing "absent" could mean building an empty
+# database over data that is still there.
+db_instance_status() {
+  local out
+  if out="$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE_ID" \
+      --region "$AWS_REGION" --query 'DBInstances[0].DBInstanceStatus' --output text 2>&1)"; then
+    printf '%s' "$out" | tr -d '\r'
+  elif printf '%s' "$out" | grep -q "DBInstanceNotFound"; then
+    return 0
+  else
+    err "$out"
+    die "could not query RDS instance ${DB_INSTANCE_ID}"
+  fi
+}
+
+# latest_db_snapshot - newest AVAILABLE manual snapshot of the instance, or nothing.
+latest_db_snapshot() {
+  local id
+  id="$(aws rds describe-db-snapshots --db-instance-identifier "$DB_INSTANCE_ID" \
+      --snapshot-type manual --region "$AWS_REGION" \
+      --query 'reverse(sort_by(DBSnapshots[?Status==`available`], &SnapshotCreateTime))[0].DBSnapshotIdentifier' \
+      --output text)" || die "could not list snapshots of ${DB_INSTANCE_ID}"
+  id="$(printf '%s' "$id" | tr -d '\r')"
+  [ "$id" = "None" ] && id=""
+  printf '%s' "$id"
 }
 
 # ---------------------------------------------------------------------------

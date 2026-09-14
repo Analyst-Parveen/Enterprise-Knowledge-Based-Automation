@@ -83,10 +83,28 @@ class TestRBAC:
 
         require_admin(admin_a)  # must not raise
 
-    def test_roles_are_exactly_user_and_admin(self) -> None:
+    def test_the_role_set_is_closed(self) -> None:
+        """Three roles, and the token layer and the database layer agree on them.
+
+        A role that exists in one layer but not the other is how an
+        unauthorized principal gets in, so both sets are pinned here together.
+        """
+        from typing import get_args
+
+        from app.core.auth import KNOWN_ROLES
+        from app.core.context import Role
         from app.db.models import UserRole
 
-        assert {r.value for r in UserRole} == {"user", "admin"}
+        expected = {"user", "admin", "platform_admin"}
+        assert {r.value for r in UserRole} == expected
+        assert set(get_args(Role)) == expected
+        assert set(KNOWN_ROLES) == expected
+
+    def test_the_platform_role_is_not_tenant_assignable(self) -> None:
+        """No tenant admin may ever hand out platform privileges."""
+        from app.core.context import TENANT_ASSIGNABLE_ROLES
+
+        assert set(TENANT_ASSIGNABLE_ROLES) == {"user", "admin"}
 
 
 class TestDevAuthGating:
@@ -163,6 +181,41 @@ class TestSecurityHeaders:
         from app.core.config import settings
 
         assert "*" not in settings.cors_origins
+
+
+class TestCognitoErrorsDoNotLeak:
+    def test_access_denied_is_reported_as_unavailable(self) -> None:
+        from app.core.exceptions import UpstreamError
+        from app.services.identity import _translate
+
+        class _DeniedError(Exception):
+            response = {"Error": {"Code": "AccessDeniedException"}}
+
+        err = _translate(_DeniedError())
+        assert isinstance(err, UpstreamError)
+        assert "denied" not in err.message.lower()
+        assert "unavailable" in err.message.lower()
+
+
+class TestCognitoTaskRoleStaysLeastPrivilege:
+    """The task may sign in and invite; it must never choose a password."""
+
+    def test_sign_in_and_invite_are_granted_and_password_set_is_not(self) -> None:
+        from pathlib import Path
+
+        policy = (
+            Path(__file__).resolve().parents[3]
+            / "infra"
+            / "terraform"
+            / "modules"
+            / "service"
+            / "main.tf"
+        ).read_text(encoding="utf-8")
+        assert "cognito-idp:InitiateAuth" in policy
+        assert "cognito-idp:RespondToAuthChallenge" in policy
+        assert "cognito-idp:AdminCreateUser" in policy
+        assert "cognito-idp:AdminSetUserPassword" not in policy
+        assert "cognito-idp:AdminDeleteUser" not in policy
 
 
 class TestRateLimitConfig:

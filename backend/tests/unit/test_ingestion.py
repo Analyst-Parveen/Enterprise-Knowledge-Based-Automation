@@ -123,6 +123,43 @@ class TestModelRegistry:
 
         assert not _supports_vision("amazon.titan-embed-text-v2:0")
 
+    @pytest.mark.parametrize("prefix", ["us.", "eu.", "apac.", "global."])
+    def test_inference_profile_prefix_is_stripped(self, prefix: str) -> None:
+        """Nova needs an inference-profile prefix; lookups must see through it."""
+        from app.services.ai.registry import _pricing, _supports_vision, base_model_id
+
+        assert base_model_id(f"{prefix}amazon.nova-lite-v1:0") == "amazon.nova-lite-v1:0"
+
+        # Real pricing, not the conservative fallback.
+        assert _pricing(f"{prefix}amazon.nova-lite-v1:0") == _pricing("amazon.nova-lite-v1:0")
+        assert _pricing(f"{prefix}amazon.nova-lite-v1:0") != (0.10, 0.40)
+
+        # Vision support must be read from the base ID, not the prefixed one.
+        assert _supports_vision(f"{prefix}amazon.nova-lite-v1:0")
+        assert not _supports_vision(f"{prefix}amazon.nova-micro-v1:0")
+
+    def test_prefixed_nova_micro_is_still_text_only(self) -> None:
+        """The bug this guards: `us.` made nova-micro look vision-capable."""
+        from app.services.ai.registry import ModelSpec, validate_vision_routing
+
+        spec = ModelSpec(
+            model_id="us.amazon.nova-micro-v1:0",
+            role=ModelRole.VISION,
+            supports_vision=False,
+            input_cost_per_1m=0.035,
+            output_cost_per_1m=0.14,
+        )
+        with pytest.raises(ValueError, match="text-only"):
+            validate_vision_routing(spec)
+
+    def test_configured_defaults_are_internally_consistent(self) -> None:
+        """The shipped defaults must not point vision at a text-only model."""
+        vision = resolve(ModelRole.VISION)
+        assert vision.supports_vision, f"{vision.model_id} cannot accept images"
+
+        embedding = resolve(ModelRole.EMBEDDING)
+        assert "embed" in embedding.model_id, "the embedding role must use an embedding model"
+
     def test_cost_estimation(self) -> None:
         spec = resolve(ModelRole.CHAT_PRIMARY)
         cost = estimate_cost(spec, 1_000_000, 1_000_000)

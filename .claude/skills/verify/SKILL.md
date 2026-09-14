@@ -18,6 +18,24 @@ pass.
 `terraform destroy` and `terraform apply` are both forbidden here. `terraform plan`
 is permitted only to detect drift.
 
+## What `verify.sh` actually checks today (2026-09-11)
+
+The steps below are the full target. The script currently runs the identity
+preflight, lists `ProjectCode=ekba` resources, and makes **one** real check:
+`curl -fsS --max-time 10 "$API_URL/api/v1/health"` from the operator's machine
+through the ALB. Everything else prints `SKIP … Phase N`. Cover the rest by hand
+when a real verification is asked for, and say which checks were manual.
+
+That one check depends on network reachability, not only on the app: the ALB
+admits only `allowed_cidrs` (one operator `/32`). A timeout (curl exit 28) with
+healthy ALB targets and `200`s in the API log from `10.42.x.x` means the
+operator IP changed — the app is fine. Report it as that, not as an application
+failure.
+
+`/api/v1/health` is liveness only (`components: []`). For the dependency check
+in Step 3, call `/api/v1/health/ready`: it reports Postgres, Redis and Qdrant and
+returns `503` if any is down.
+
 ## Step 1 — Identity and ownership
 
 ```bash
@@ -37,25 +55,39 @@ prefix + `ProjectCode=ekba` tag). Report anything ambiguous; touch nothing.
 - Networking: private subnets, security groups, no unintended public exposure.
 - S3: public access blocked, encryption on, versioning as configured.
 - IAM roles exist and are scoped, with no wildcard grants beyond the documented
-  exceptions.
+  exceptions. The ECS task role's Cognito grant is the one to look at closely: it
+  holds only the admin actions the invitation flow needs, pinned to this
+  project's own user pool ARN, and must **not** include `AdminSetUserPassword` or
+  `AdminDeleteUser` — the application must not be able to choose someone's
+  password or erase an identity.
 - Secrets exist in Secrets Manager. **Verify presence and metadata only — never
   read or print a secret value.**
 
 ## Step 3 — Services
 
-- PostgreSQL reachable from the application security group; migrations at head.
+- PostgreSQL (Amazon RDS `ekba-<env>-postgres`) reachable from the task security
+  group; migrations at head. `verify.sh` checks this three ways: `/health/ready`
+  (a real `SELECT 1`), the instance being `available`, not publicly accessible and
+  encrypted, and the DB security group admitting only the task security group.
 - Qdrant reachable; collections exist with the expected vector dimension.
 - Redis reachable; used for cache and rate limiting.
 - Containers running as non-root, healthy, and at the expected image SHA.
 
 ## Step 4 — Application
 
-- `/health` liveness and readiness return healthy.
+- `/api/v1/health` (liveness) and `/api/v1/health/ready` (readiness) return healthy.
 - Authentication rejects an unauthenticated request with 401.
 - Security headers present: HSTS, `X-Content-Type-Options`, `X-Frame-Options`,
   `Referrer-Policy`, CSP.
 - CORS reflects the allow-list only.
-- Rate limiting returns 429 at the configured thresholds (20 / 10 / 5 per minute).
+- Rate limiting returns 429 at the configured thresholds (20 / 10 / 5 per minute,
+  and 10 sign-in attempts per minute per account).
+- Sign-in works against the real user pool: `POST /api/v1/auth/login` with a
+  known account returns a session, and a wrong password returns one generic
+  message that does not reveal whether the account exists. Never record the
+  credential used, in the report or anywhere else.
+- The platform routes refuse a tenant role: a company admin's token gets 403 from
+  `GET /api/v1/platform/tenants`.
 
 ## Step 5 — AI pipeline
 
@@ -81,8 +113,10 @@ Check specifically:
 
 - CloudWatch log groups receiving structured logs with correlation IDs.
 - Metrics flowing for requests, latency, tokens, cost, cache hits, security events.
-- Alarms configured, including estimated spend.
-- Report currently running billable resources and their cost at rest.
+- Alarms configured. Estimated spend is covered by the cost-guard budgets — the
+  `EstimatedCharges` alarm exists only in `us-east-1` deployments.
+- Report currently running billable resources and their cost at rest, and
+  whether the cost guard is armed or in dry-run (`./scripts/cost-check.sh`).
 
 ## Step 7 — Report
 

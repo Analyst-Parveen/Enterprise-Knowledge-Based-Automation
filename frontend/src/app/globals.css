@@ -1,0 +1,104 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Light palette on :root; only the tokens are redefined for dark, so no
+   colour has its single definition inside a media query.
+
+   Status text colours use the darker shade in light mode so that small text
+   on a white surface keeps a WCAG AA contrast ratio (>= 4.5:1). */
+:root {
+  --bg: 246 247 251;
+  --surface: 255 255 255;
+  --surface-2: 248 250 252;
+  --border: 226 232 240;
+  --fg: 15 23 42;
+  --muted: 91 104 128;
+  --accent: 79 70 229;   /* indigo  - brand, primary actions */
+  --accent-2: 124 58 237; /* violet  - brand gradient partner */
+  --info: 3 105 161;     /* sky     - informational */
+  --ok: 4 120 87;        /* emerald - healthy / ready */
+  --warn: 180 83 9;      /* amber   - attention */
+  --danger: 225 29 72;   /* rose    - failure */
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: 8 11 22;
+    --surface: 17 21 36;
+    --surface-2: 23 28 46;
+    --border: 39 46 69;
+    --fg: 241 245 249;
+    --muted: 148 163 184;
+    --accent: 129 140 248;
+    --accent-2: 167 139 250;
+    --info: 56 189 248;
+    --ok: 52 211 153;
+    --warn: 251 191 36;
+    --danger: 251 113 133;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: 8 11 22;
+  --surface: 17 21 36;
+  --surface-2: 23 28 46;
+  --border: 39 46 69;
+  --fg: 241 245 249;
+  --muted: 148 163 184;
+  --accent: 129 140 248;
+  --accent-2: 167 139 250;
+  --info: 56 189 248;
+  --ok: 52 211 153;
+  --warn: 251 191 36;
+  --danger: 251 113 133;
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: rgb(var(--bg));
+  color: rgb(var(--fg));
+}
+
+body {
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "cv11", "ss01";
+}
+
+*:focus-visible {
+  outline: 2px solid rgb(var(--accent));
+  outline-offset: 2px;
+}
+
+::selection {
+  background: rgb(var(--accent) / 0.2);
+}
+
+@layer utilities {
+  /* The brand gradient, used sparingly: logo mark, primary button, hero. */
+  .bg-brand {
+    background-image: linear-gradient(135deg, rgb(var(--accent)), rgb(var(--accent-2)));
+  }
+  .text-brand {
+    background-image: linear-gradient(135deg, rgb(var(--accent)), rgb(var(--accent-2)));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

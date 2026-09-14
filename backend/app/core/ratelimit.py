@@ -4,6 +4,7 @@ Limits (PROJECT.md section 9), all per user per minute:
     api      20
     server   10
     upload    5
+    auth     10   per account - sign-in has no principal to key on yet
 
 Keys are namespaced by tenant AND user so buckets never collide across tenants.
 See .claude/rules/tenant-isolation.md section 5.
@@ -11,6 +12,7 @@ See .claude/rules/tenant-isolation.md section 5.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Literal
 
 import redis.asyncio as redis
@@ -20,7 +22,7 @@ from app.core.context import RequestContext
 from app.core.exceptions import RateLimitError
 from app.core.logging import log_security_event
 
-Bucket = Literal["api", "server", "upload"]
+Bucket = Literal["api", "server", "upload", "auth"]
 
 _client: redis.Redis | None = None
 
@@ -44,13 +46,13 @@ def _limit_for(bucket: Bucket) -> int:
         "api": settings.rate_limit_requests_per_min,
         "server": settings.rate_limit_server_requests_per_min,
         "upload": settings.rate_limit_uploads_per_min,
+        "auth": settings.rate_limit_auth_attempts_per_min,
     }[bucket]
 
 
-async def enforce(ctx: RequestContext, bucket: Bucket = "api") -> None:
+async def _consume(key: str, bucket: Bucket) -> None:
     """Fixed-window counter. Raises RateLimitError with Retry-After when exceeded."""
     limit = _limit_for(bucket)
-    key = f"{settings.project_code}:rl:{bucket}:{ctx.tenant_id}:{ctx.user_id}"
 
     client = get_redis()
     pipe = client.pipeline()
@@ -71,3 +73,22 @@ async def enforce(ctx: RequestContext, bucket: Bucket = "api") -> None:
             limit=limit,
         )
         raise RateLimitError(retry_after=retry_after)
+
+
+async def enforce(ctx: RequestContext, bucket: Bucket = "api") -> None:
+    await _consume(f"{settings.project_code}:rl:{bucket}:{ctx.tenant_id}:{ctx.user_id}", bucket)
+
+
+async def enforce_anonymous(identifier: str, bucket: Bucket = "auth") -> None:
+    """Rate limit for endpoints reached before any principal exists.
+
+    Keyed by the account being authenticated rather than the client IP: behind
+    CloudFront and an ALB the client IP is either shared by everyone or taken
+    from a client-supplied `X-Forwarded-For`, so an IP bucket would be both
+    unfair and trivially rotated. The account name is the thing under attack in
+    credential stuffing, and it cannot be rotated away.
+
+    The identifier is hashed so the Redis keyspace never holds an address.
+    """
+    digest = hashlib.sha256(f"{settings.project_code}:{identifier}".encode()).hexdigest()[:32]
+    await _consume(f"{settings.project_code}:rl:{bucket}:{digest}", bucket)

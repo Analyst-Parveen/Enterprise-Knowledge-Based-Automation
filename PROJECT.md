@@ -53,13 +53,16 @@ served through secure, tenant-aware RAG and agentic automation.
 
 ### Data
 - **Vector DB:** Qdrant — runs as a container, never a managed service
-- **Database:** PostgreSQL — container in dev **and** in the ephemeral AWS demo.
-  No RDS. (Supabase is an option for a persistent free-tier demo.)
+- **Database:** PostgreSQL 16 — a container locally, **Amazon RDS**
+  (`db.t4g.micro`, private subnets) in the AWS demo, so data survives task
+  replacement. Approved 2026-09-11; replaced the Postgres sidecar.
 - **Cache:** Redis — container. **No ElastiCache.**
 - **Storage:** Amazon S3 (the only persistent data store in the demo)
 
-> All three data services run as containers alongside the API. They are
-> **re-seeded on every deploy**, which is what makes the $20 budget achievable.
+> Qdrant and Redis run as containers alongside the API and are **re-seeded on
+> every deploy**, which is what makes the $20 budget achievable. PostgreSQL is
+> the one managed service: a single small RDS instance that lives and dies with
+> the ephemeral stack, with its data carried between sessions as a snapshot.
 > See section 16.
 
 ### Identity
@@ -72,11 +75,16 @@ provider is required for the system to work.
 
 | Role | Model ID | Notes |
 |---|---|---|
-| Chat (primary) | `openai.gpt-oss-20b-1:0` | OpenAI open-weight, text-only, limited regions |
-| Chat (fallback) | `amazon.nova-lite-v1:0` | Cheaper, wider regional availability |
-| Vision / multimodal | `amazon.nova-lite-v1:0` | Native image **and** video understanding |
-| Embeddings | `amazon.titan-embed-text-v2:0` | 1024 dimensions, cheapest Bedrock embedding |
+| Chat (primary) | `us.amazon.nova-lite-v1:0` | Inference-profile ID — Nova cannot be invoked by bare ID |
+| Chat (fallback) | `us.amazon.nova-micro-v1:0` | Cheaper, **text-only** |
+| Vision / multimodal | `us.amazon.nova-lite-v1:0` | Native image **and** video understanding |
+| Embeddings | `amazon.titan-embed-text-v2:0` | 1024 dimensions, invoked directly (no prefix) |
 | Audio | Amazon Transcribe | Speech-to-text for audio, video, and voice input |
+
+The original plan put `openai.gpt-oss-20b-1:0` in the primary chat slot. It was
+replaced because `us-west-2` offered no `gpt-oss` models at the last check. See
+[ai-model-usage.md](.claude/rules/ai-model-usage.md) for the registry and the
+inference-profile rule.
 
 **Factual constraints that shaped this table:**
 
@@ -95,8 +103,10 @@ provider is required for the system to work.
 2. All model IDs are configuration (`.env` / Secrets Manager), never hardcoded.
    Swapping a model must not require a code change.
 3. Verify regional availability and current pricing in the target account before
-   depending on a model. If the primary chat model is unavailable in the region,
-   fall back to Nova Lite and record the fallback in `model_used`.
+   depending on a model — and its **quota**: a new account can show every Bedrock
+   inference quota as `0`, which is the case in this project's AWS account as of
+   2026-09-11. If the primary chat model is unavailable, fall back to the
+   configured fallback model and record the fallback in `model_used`.
 
 ### Infrastructure and delivery
 - AWS + Terraform
@@ -254,14 +264,50 @@ validation, HTTPS, encrypted S3, private database and networking, non-root
 containers, ECR scanning, AWS Secrets Manager.
 
 ### Roles
-- `user`
-- `admin`
+- `user` — an employee of a customer company.
+- `admin` — that company's own administrator.
+- `platform_admin` — the service provider. Lives in the reserved `platform`
+  tenant, which holds operators and no content.
+
+### Onboarding hierarchy
+
+```
+Platform operator (platform_admin, tenant "platform")
+  └── creates a company          ──> tenant row + audited event
+        └── invites its first admin (role=admin, that tenant)
+              └── creates its own users (role=user or admin, same tenant)
+```
+
+Each step is only available one level up, and never sideways or downward into
+another company. The rules that make it hold:
+
+1. Only `platform_admin` may create a company.
+2. `admin` manages users **only inside its own company**, and may assign only
+   `user` or `admin`.
+3. `admin` can never create a company, and can never create or become a
+   `platform_admin`.
+4. `user` manages nothing.
+5. The platform role and the `platform` tenant imply each other at token
+   verification, so neither half can be forged alone.
+6. No API grants `platform_admin`. The first operator is created out of band by
+   `scripts/bootstrap-platform-admin.sh`.
+7. A company can never be left with no active administrator.
 
 ### Access rules
 1. Users only access documents in tenants they are authorized for.
-2. Admins can access operational metrics.
+2. Admins can access operational metrics for their own company.
 3. Document deletion requires ownership or explicit authorization.
 4. Every RAG query applies `tenant_id` filtering.
+5. `platform_admin` sees the company **registry** — names, ids, seat counts and
+   the onboarding trail — and never a company's documents, conversations,
+   metrics or chat. The registry lives in one module (`app/db/control_plane.py`)
+   behind one dependency, and every mutation is audited under the target tenant.
+
+### Authentication flow
+Sign-in is email and password against the Cognito user pool, proxied through the
+API so local development exercises the same path. Accounts are created by
+invitation only: Cognito emails a one-time password and the invitee replaces it
+on first sign-in. The application never sets, stores, logs or returns a password.
 
 ---
 
@@ -272,6 +318,10 @@ containers, ECR scanning, AWS Secrets Manager.
 | API requests | 20 / minute / user |
 | Server-side requests | 10 / minute / user |
 | Document uploads | 5 / minute / user |
+| Sign-in / password reset | 10 / minute / account |
+
+The auth bucket is keyed by a hash of the account identifier rather than the IP:
+behind CloudFront and an ALB the client IP is shared or client-supplied.
 
 ---
 
@@ -299,15 +349,28 @@ Datasets live in [evaluation/datasets/](evaluation/datasets/).
 **Landing / first page — "Enterprise Knowledge AI"** shows: search/chat,
 documents, departments, recent queries, usage, confidence, citations.
 
-| User pages | Admin pages |
-|---|---|
-| Dashboard | Users |
-| Knowledge Chat | Tenants |
-| Documents | Documents |
-| Departments | AI Metrics |
-| Usage | Security |
-| Feedback | Audit Logs |
-| | Deployments |
+| User pages | Company admin pages | Platform pages |
+|---|---|---|
+| Dashboard | Users | Companies |
+| Knowledge Chat | My Company | Onboarding Trail |
+| Documents | Documents | Security |
+| Departments | AI Metrics | Deployments |
+| Usage | Security | |
+| Feedback | Audit Logs | |
+| | Deployments | |
+
+Navigation is role-aware: a platform operator lands on a Control plane home
+(registry and onboarding trail only) and sees no chat or documents, because the
+platform tenant holds none. Hiding a page is a
+convenience, never the boundary — every route is authorized again server-side,
+and each frontend gate mirrors exactly one backend dependency
+(`AdminOnly`/`AdminUser`, `TenantAdminOnly`/`TenantAdminUser`,
+`PlatformAdminOnly`/`PlatformAdminUser`).
+
+The sign-in page asks for an email and a password, handles the first-sign-in
+password challenge and password recovery, renews the session silently, and
+revokes it server-side on sign-out. A paste-a-token box exists for local
+debugging only and renders solely when the API is localhost.
 
 Development data is seeded so no dashboard renders empty.
 
@@ -347,8 +410,12 @@ Push -> Test -> Security checks -> Build -> Docker -> Scan -> ECR
 
 ## 16. AWS cost strategy — $20 hard cap
 
-$140 of credit is available. **The spend target is $20 total, and $20 is treated
-as a hard ceiling, not a guideline.** Everything below follows from that.
+The account holds promotional credits ($158.99 remaining at the last check,
+2026-09-11) and is on the AWS **Paid** plan — the Free plan does not allow
+CodeDeploy. **The spend target is $20 total, and $20 is treated as a hard
+ceiling, not a guideline.** Spend is measured **gross of credits**: credits pay
+first, but a ceiling measured after credits would read $0 until they ran out.
+Everything below follows from that.
 
 ### The operating model
 
@@ -365,7 +432,7 @@ in minutes with freshly seeded data.
 | Environment | Where | Cost |
 |---|---|---|
 | **Local** — all day-to-day development | Docker Compose | **$0** |
-| **AWS demo** — deployed only when needed | ECS Fargate, ephemeral | ~$0.30 / session |
+| **AWS demo** — deployed only when needed | ECS Fargate + RDS, ephemeral | ~$0.11 / hour (~$0.44 per 4-hour session) |
 
 All development, testing, and iteration happens locally at zero cost. AWS is used
 only to prove the deployment story and run a live demo.
@@ -376,47 +443,80 @@ only to prove the deployment story and run a live demo.
 
 | Resource | Sizing | Approx. cost |
 |---|---|---|
-| Application Load Balancer | 1, single AZ pair | ~$0.023 / hr |
-| ECS Fargate task | 1 vCPU / 2 GB, all containers in one task | ~$0.049 / hr |
+| Application Load Balancer | 1, across two AZs | ~$0.023 / hr + LCUs |
+| ECS Fargate task | 1 vCPU / 3 GB, three containers in one task | ~$0.054 / hr |
+| RDS PostgreSQL | `db.t4g.micro`, single-AZ, 20 GB gp3, private | ~$0.016 / hr + ~$0.003 / hr storage |
+| Public IPv4 addresses | 2 on the ALB, 1 on the task | ~$0.015 / hr |
 | S3 | documents | pennies |
 | Cognito | user pool | free tier |
 | CloudWatch Logs | 1-day retention | pennies |
 | Bedrock | per token | ~$0.01–0.05 / session |
 | Amazon Transcribe | per minute of audio | keep demo clips short |
 
-**A 4-hour demo session costs roughly $0.30.** That is ~60 sessions inside $20.
+**A 4-hour demo session costs roughly $0.44** (list-price estimate). That is
+about 40 sessions before the $18 automatic shutdown. The protected baseline adds
+about $1.70/month at rest, mostly four Secrets Manager secrets, plus a few cents
+for the database snapshots kept between sessions.
+
+The database is the one resource that would break the budget if forgotten:
+**~$14/month running 24/7**. It therefore lives in the ephemeral stack, and the
+cost guard stops it (never deletes it) on a budget or session-limit breach.
 
 **Never provisioned, at all:**
 
 | Excluded | Why |
 |---|---|
 | NAT Gateway | ~$32/mo + data. Fargate runs in a public subnet with a public IP to reach ECR. |
-| RDS | Postgres runs as a container and is re-seeded each deploy |
+| RDS running between sessions, Multi-AZ, or anything above `db.t4g.small` | One single-AZ `db.t4g.micro` exists only while the stack does; its data is kept as a snapshot |
 | ElastiCache | Redis runs as a container |
 | EKS | ~$73/mo control plane alone. ECS Fargate tells the same story for free. |
 | EFS / persistent volumes | Data is ephemeral by design |
 | Idle compute or load balancers | Nothing survives `destroy.sh` |
 
-### Data is deliberately ephemeral
+### What persists, and what is deliberately ephemeral
 
-PostgreSQL, Qdrant, and Redis run as containers with no persistent volume. Their
-data is lost on destroy — **this is intended.** `seed.sh` rebuilds the demo
-dataset through the real ingestion pipeline on every deploy, so dashboards and
-retrieval are always populated with genuine chunks, embeddings, and citations.
+| Data | On AWS | Survives task replacement? | Survives `destroy.sh`? |
+|---|---|---|---|
+| Relational data (tenants, users, documents, jobs, conversations, usage, audit) | **RDS PostgreSQL** | **Yes** | **Yes, through the snapshot `destroy.sh` takes and `deploy.sh` restores** |
+| Vectors (chunks + embeddings) | Qdrant container | No | No |
+| Cache, semantic cache, rate limits | Redis container | No | No |
+| Uploaded files | S3 (protected baseline) | Yes | Yes |
 
-Only S3 documents and Secrets Manager persist.
+Qdrant and Redis run as containers with no persistent volume — **this is
+intended.** On AWS the API container migrates and re-seeds at every task start
+(`alembic upgrade head`, then `python -m seeds.seed`, through the real ingestion
+pipeline), so dashboards and retrieval are populated with genuine chunks,
+embeddings, and citations. `alembic upgrade head` is a no-op once the schema is
+current, and the seed upserts by stable IDs, so a persistent database is never
+duplicated. A failed seed does not stop the API. `seed.sh` does the same for the
+local stack.
+
+> **Known gap:** because Qdrant is still ephemeral while PostgreSQL is not, a
+> document uploaded on AWS keeps its row and its S3 file but loses its vectors at
+> the next task replacement, so it stops being retrievable until it is ingested
+> again. Only the seed documents are re-indexed automatically. A re-index job for
+> user documents is **not implemented**.
+
+Beyond the database, only the protected baseline persists: S3 documents, Secrets
+Manager, ECR images, Cognito, budgets and the audit log group.
 
 ### Enforcement
 
 1. An AWS Budget of **$20** is created as part of the protected baseline, with
-   alerts at 50% / 80% / 100%.
-2. `verify.sh` and `cost-check.sh` report current month-to-date spend and what is
-   running billable right now.
-3. `deploy.sh` refuses to deploy if month-to-date spend has crossed the configured
-   ceiling (`MAX_MONTHLY_SPEND_USD`).
-4. Every deploy prints an estimated hourly burn and a reminder to run
+   alerts at 50% / 80% / 100%. It uses the AWS default of including credits, so
+   it only alerts once spend reaches the card.
+2. The **cost guard** (`infra/terraform/envs/cost-guard`) measures gross usage.
+   It emails at $10 and $15, and stops the ephemeral stack — ECS scaled to zero,
+   ALB deleted — at $18 of gross usage, on any charge credits did not cover, or
+   when the stack is older than 8 hours. Applied 2026-09-11, **in dry-run** until
+   explicitly armed.
+3. `cost-check.sh` reports gross usage, credits applied, net spend, what is
+   running billable right now, and whether the kill switch is armed.
+4. `deploy.sh` refuses to deploy once gross usage since `COST_GUARD_START`
+   reaches `COST_GUARD_SHUTDOWN_USD` ($18).
+5. Every deploy prints an estimated hourly burn and a reminder to run
    `destroy.sh`.
-5. Adding any new AWS resource requires stating its cost at rest. If it cannot be
+6. Adding any new AWS resource requires stating its cost at rest. If it cannot be
    justified inside $20, it does not go in.
 
 ---
@@ -427,8 +527,9 @@ Reproducibility is mandatory. Lifecycle entrypoints in [scripts/](scripts/):
 
 | Script | Responsibility |
 |---|---|
-| `deploy.sh` | Create/update infrastructure, deploy application, verify, test |
+| `deploy.sh` | Create/update infrastructure, deploy application, verify |
 | `verify.sh` | Verify AWS infrastructure, services, application, AI pipeline |
+| `cost-check.sh` | Report gross/net spend, billable resources, and cost-guard state |
 | `test-e2e.sh` | Run complete end-to-end tests |
 | `seed.sh` | Seed development/demo data |
 | `rollback.sh` | Safely roll back the application |
@@ -498,27 +599,37 @@ citation validation, relevance threshold, semantic cache, model routing,
 reranking, token and cost tracking. LangGraph agentic workflows including policy
 comparison. The full security test suite. The evaluation harness and baseline.
 
-**Exit:** all 17 mandatory security tests pass; evaluation baseline recorded.
+**Exit:** all 23 mandatory security tests pass (17 platform + the 6 role-hierarchy
+tests added with onboarding); evaluation baseline recorded.
 
 ---
 
 ### Phase 4 — Frontend · local · $0
 Next.js with TypeScript, Tailwind, and shadcn/ui. The Enterprise Knowledge AI
-landing page. Six user pages and seven admin pages. Chat with streaming,
+landing page. Six user pages, seven company-admin pages and the platform control
+plane. Email/password sign-in with the first-sign-in challenge, password
+recovery, silent renewal and server-side sign-out. Chat with streaming,
 citations, and confidence. Document upload with live ingestion status. Voice input
 through Transcribe into the existing pipeline. Seeded demo data. Playwright E2E.
 
-**Exit:** both dashboards visibly functional with real seeded data; E2E green.
+**Exit:** all three dashboards visibly functional with real seeded data; E2E green.
 
 ---
 
-### Phase 5 — AWS · the only phase that spends · ~$0.30 per session
+### Phase 5 — AWS · the only phase that spends · ~$0.44 per session
 Terraform for the ephemeral stack (ALB, ECS Fargate, ECR, S3, Cognito,
 CloudWatch, IAM, Budget). GitHub Actions with OIDC. CodeDeploy blue-green.
 CloudWatch metrics and alarms, LangSmith tracing. The lifecycle scripts fully
 wired. First real `deploy -> verify -> seed -> e2e -> demo -> destroy` cycle.
 
 **Exit:** the full cycle runs twice, proving reproducibility, for under $1 total.
+
+**Status (2026-09-11) — in progress, exit not yet met.** Done: baseline and
+`dev` stack applied; two CodeDeploy blue-green deployments succeeded and
+`verify.sh` passed on the second; cost guard applied in dry-run. Not yet done:
+a `destroy -> deploy` cycle; `rollback.sh` traffic shift; the GitHub Actions
+deploy workflow; Bedrock on AWS (quotas are 0); `verify.sh` checks beyond
+liveness.
 
 ---
 
@@ -543,7 +654,7 @@ That leaves roughly $16 of the $20 ceiling for demos and interview walkthroughs.
   explainable in an interview.
 - Build and test locally first, then deploy to AWS.
 - Seed demo data.
-- User and admin dashboards must be visibly functional.
+- User, company-admin and platform dashboards must be visibly functional.
 - Generate test and verification reports into [docs/reports/](docs/reports/).
 - Proceed Phase 0 through Phase 5 in order.
 
@@ -560,23 +671,27 @@ That leaves roughly $16 of the $20 ceiling for demos and interview walkthroughs.
 │   └── skills/                 # operational workflows (deploy, verify, ...)
 ├── backend/                    # FastAPI + LangGraph service
 │   ├── app/
-│   │   ├── api/v1/             # HTTP routes
-│   │   ├── core/               # config, auth, logging, correlation ID
-│   │   ├── db/models/          # SQLAlchemy models
+│   │   ├── api/v1/             # HTTP routes (incl. auth, admin, platform)
+│   │   ├── core/               # config, auth, context, logging, correlation ID
+│   │   ├── db/                 # SQLAlchemy models, tenant-filtered repositories,
+│   │   │                       #   and control_plane (the one audited registry)
 │   │   ├── schemas/            # Pydantic contracts
 │   │   ├── services/
+│   │   │   ├── identity.py     # Cognito admin + dev-local identity provider
+│   │   │   ├── onboarding.py   # role/tenant guard functions (pure, DB-free)
 │   │   │   ├── ingestion/      # multimodal extract -> chunk -> embed
 │   │   │   ├── rag/            # retrieval, rerank, citation, model routing
 │   │   │   ├── agents/         # LangGraph workflows
 │   │   │   ├── security/       # injection scan, guardrails, validation
 │   │   │   └── observability/  # metrics, cost, LangSmith
 │   │   └── workers/            # async ingestion jobs
-│   ├── alembic/                # migrations
+│   ├── alembic/                # migrations (0001 schema, 0002 onboarding)
 │   ├── seeds/                  # demo data
-│   └── tests/                  # unit | integration | security | evaluation
+│   └── tests/                  # unit | integration | security | evaluation | e2e
 ├── frontend/                   # Next.js dashboard
 │   ├── src/app/(user)/         # dashboard, chat, documents, departments, usage, feedback
-│   ├── src/app/(admin)/        # users, tenants, documents, metrics, security, audit, deployments
+│   ├── src/app/admin/          # users, my company, documents, metrics, security, audit, deployments
+│   ├── src/app/platform/       # companies (onboarding), onboarding trail
 │   └── tests/e2e/              # Playwright
 ├── infra/
 │   ├── terraform/

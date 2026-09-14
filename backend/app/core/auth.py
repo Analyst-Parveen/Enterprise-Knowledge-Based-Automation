@@ -17,11 +17,13 @@ import jwt
 from jwt import PyJWKClient
 
 from app.core.config import settings
-from app.core.context import RequestContext, Role
+from app.core.context import PLATFORM_TENANT_ID, RequestContext, Role
 from app.core.exceptions import AuthenticationError, AuthorizationError
 from app.core.logging import get_logger, log_security_event
 
 logger = get_logger(__name__)
+
+KNOWN_ROLES: tuple[str, ...] = ("user", "admin", "platform_admin")
 
 # Cognito custom attributes carrying our authorization data.
 TENANT_CLAIM = "custom:tenant_id"
@@ -56,9 +58,21 @@ def _claims_to_context(claims: dict[str, Any]) -> RequestContext:
         # A token without a tenant cannot be authorized for any data.
         log_security_event("auth.missing_tenant", reason="token_has_no_tenant_claim")
         raise AuthenticationError("Token is missing a tenant assignment.")
-    if raw_role not in ("user", "admin"):
+    if raw_role not in KNOWN_ROLES:
         log_security_event("auth.unknown_role", reason="role_not_in_allowlist")
         raise AuthenticationError("Token carries an unrecognized role.")
+
+    # The platform role and the platform tenant imply each other. Binding them
+    # here means a stolen or mis-provisioned identity cannot hold platform
+    # privileges while sitting inside a customer tenant, and a customer tenant
+    # can never be the platform tenant.
+    if (raw_role == "platform_admin") != (str(tenant_id) == PLATFORM_TENANT_ID):
+        log_security_event(
+            "auth.platform_role_tenant_mismatch",
+            reason="platform_role_requires_platform_tenant",
+            severity="critical",
+        )
+        raise AuthenticationError("Token carries an inconsistent tenant assignment.")
 
     return RequestContext(
         user_id=str(user_id),
@@ -140,5 +154,32 @@ def require_admin(ctx: RequestContext) -> None:
             "authz.admin_required",
             reason="non_admin_attempted_admin_endpoint",
             severity="error",
+        )
+        raise AuthorizationError()
+
+
+def require_tenant_admin(ctx: RequestContext) -> None:
+    """Tenant-admin gate for managing users inside one company.
+
+    Platform operators are deliberately excluded: they onboard a company and
+    its first admin, then step back. Reaching into a customer's user list is a
+    separate, explicitly audited platform endpoint - not a side effect of rank.
+    """
+    if not ctx.is_tenant_admin:
+        log_security_event(
+            "authz.tenant_admin_required",
+            reason="non_tenant_admin_attempted_user_management",
+            severity="error",
+        )
+        raise AuthorizationError()
+
+
+def require_platform_admin(ctx: RequestContext) -> None:
+    """Platform gate. The only role permitted to create tenants."""
+    if not ctx.is_platform_admin:
+        log_security_event(
+            "authz.platform_admin_required",
+            reason="non_platform_admin_attempted_platform_endpoint",
+            severity="critical",
         )
         raise AuthorizationError()

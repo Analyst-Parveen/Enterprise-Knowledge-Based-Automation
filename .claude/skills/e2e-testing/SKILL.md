@@ -30,10 +30,17 @@ come from configuration — never hardcoded.
 ## Step 2 — Required journeys
 
 **Authentication**
-1. Unauthenticated access to a protected page redirects to login.
-2. Cognito login succeeds; JWT is issued and accepted.
+1. Unauthenticated access to a protected page shows the sign-in gate.
+2. Email + password sign-in succeeds; the ID token is issued and accepted.
 3. Expired or invalid token is rejected with 401.
-4. Logout clears the session.
+4. Sign-out revokes the session server-side and clears it locally; going back to
+   a protected page does not restore it.
+5. Wrong credentials give one generic message that does not reveal whether the
+   account exists.
+6. A first sign-in on an invited account must set a password before any session
+   is issued.
+7. Password recovery is reachable and returns to sign-in.
+8. An expiring session renews silently instead of interrupting the user.
 
 **Document lifecycle**
 5. Upload a PDF; ingestion job progresses to completed.
@@ -63,13 +70,25 @@ come from configuration — never hardcoded.
 **Dashboards**
 17. User pages render with seeded data: Dashboard, Knowledge Chat, Documents,
     Departments, Usage, Feedback.
-18. Admin pages render: Users, Tenants, Documents, AI Metrics, Security,
-    Audit Logs, Deployments.
-19. A non-admin user cannot reach admin pages.
+18. Company admin pages render: Users, My Company, Documents, AI Metrics,
+    Security, Audit Logs, Deployments.
+19. Platform pages render: Companies, Onboarding Trail.
+20. A non-admin user cannot reach admin pages or platform pages.
+
+**Onboarding hierarchy** (a failure here is release-blocking)
+21. A platform operator onboards a company, invites its administrator, and that
+    administrator signs in and creates its own users.
+22. A company admin's invite form offers only `user` and `admin` — no platform
+    role, in the markup or the API.
+23. A company admin cannot reach the platform pages or create a company.
+24. A platform operator cannot manage a company's users.
+25. Two companies' administrators cannot see each other's users.
+26. No response or rendered page from the invitation flow contains a password.
 
 **Resilience**
-20. Rate limiting surfaces a clear message at the configured thresholds.
-21. Correlation ID is present in the browser request and traceable through to
+27. Rate limiting surfaces a clear message at the configured thresholds,
+    including repeated sign-in attempts for one account.
+28. Correlation ID is present in the browser request and traceable through to
     backend logs and LangSmith.
 
 ## Step 3 — Execute
@@ -77,9 +96,13 @@ come from configuration — never hardcoded.
 ```bash
 ./scripts/test-e2e.sh
 # or, directly:
-pytest backend/tests/integration backend/tests/security
+pytest backend/tests/integration backend/tests/security backend/tests/e2e
 npx playwright test --config frontend/playwright.config.ts
 ```
+
+`backend/tests/e2e` needs PostgreSQL. `test-e2e.sh` distinguishes "the stack is
+down" from "the journey failed" and reports the former as a skip, because a skip
+recorded as a pass is the one outcome that makes this suite worthless.
 
 ## Step 4 — Report
 

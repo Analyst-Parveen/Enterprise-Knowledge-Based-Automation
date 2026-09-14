@@ -1,0 +1,18 @@
+# Copy to terraform.tfvars and fill in. NEVER commit terraform.tfvars.
+
+expected_aws_account_id = "123456789012"
+aws_region              = "us-west-2"
+environment             = "dev"
+
+budget_limit_usd   = 20
+budget_alert_email = "you@example.com"
+
+github_repository = "your-github-user/Enter-Prise-Knowledge-Based-Automation"
+create_github_oidc = true   # set false if the OIDC provider already exists
+
+# Bootstrap these two manually before the first apply.
+tfstate_bucket     = "ekba-tfstate-123456789012"
+tfstate_lock_table = "ekba-tfstate-lock"
+
+cognito_callback_urls = ["http://localhost:3000/"]
+cognito_logout_urls   = ["http://localhost:3000/"]

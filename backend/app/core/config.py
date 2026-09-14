@@ -8,18 +8,31 @@ See .claude/rules/secrets-management.md section 4.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["dev", "test", "staging", "prod"]
-AIProvider = Literal["bedrock", "local"]
+# AI_PROVIDER=local is the $0 offline stub. Anything else uses real backends
+# selected by EMBED_PROVIDER / LLM_PROVIDER.
+AIProvider = Literal["bedrock", "local", "hybrid"]
+EmbedProvider = Literal["cohere", "bedrock", "local"]
+LLMProvider = Literal["groq", "bedrock", "local"]
+
+# app/core/config.py -> core -> app -> backend -> repo root
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Look for .env at the repo root FIRST, then in the current directory.
+        # Without the absolute path, running `alembic` from backend/ would miss
+        # the root .env entirely and silently fall back to these defaults - which
+        # then fail against a container started with different credentials.
+        # Later entries win, so a local backend/.env can still override.
+        env_file=(REPO_ROOT / ".env", ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -55,22 +68,47 @@ class Settings(BaseSettings):
     # NEVER enable outside dev - a test asserts this.
     dev_auth_enabled: bool = False
     dev_auth_secret: SecretStr = SecretStr("dev-only-not-a-real-secret")
+    # The password every seeded account accepts when dev auth is on, so the
+    # real sign-in screen can be exercised locally with no Cognito pool.
+    dev_auth_password: SecretStr = SecretStr("LocalDev!2026")
+    dev_auth_token_ttl_seconds: int = 3600
 
-    # -- AI: Amazon Bedrock ----------------------------------------------
+    # -- AI ----------------------------------------------------------------
+    # AI_PROVIDER=local keeps the $0 stub for tests. For real backends use
+    # hybrid (or bedrock) and select chat/embed via LLM_PROVIDER / EMBED_PROVIDER.
     ai_provider: AIProvider = "bedrock"
+    embed_provider: EmbedProvider = "cohere"
+    llm_provider: LLMProvider = "groq"
+    # Concrete chat model id for the selected LLM_PROVIDER (Groq model name or
+    # Bedrock model / inference-profile id). Swapping models is config-only.
+    llm_model: str = "openai/gpt-oss-20b"
+
     aws_region: str = "us-west-2"
     bedrock_region: str = "us-west-2"
     transcribe_region: str = "us-west-2"
 
-    bedrock_chat_primary_model_id: str = "openai.gpt-oss-20b-1:0"
-    bedrock_chat_fallback_model_id: str = "amazon.nova-lite-v1:0"
-    bedrock_vision_model_id: str = "amazon.nova-lite-v1:0"
+    bedrock_chat_primary_model_id: str = "us.amazon.nova-lite-v1:0"
+    bedrock_chat_fallback_model_id: str = "us.amazon.nova-micro-v1:0"
+    bedrock_vision_model_id: str = "us.amazon.nova-lite-v1:0"
     bedrock_embedding_model_id: str = "amazon.titan-embed-text-v2:0"
+    # Kept for backwards compatibility; also the collection dimension.
     bedrock_embedding_dimension: int = 1024
+
+    cohere_api_key: SecretStr | None = None
+    cohere_embed_model: str = "embed-multilingual-v3.0"
+
+    groq_api_key: SecretStr | None = None
+    groq_api_base: str = "https://api.groq.com/openai/v1"
 
     # -- RAG / guardrail tuning ------------------------------------------
     retrieval_top_k: int = 8
     relevance_threshold: float = 0.35
+    # The local dev provider uses hashed bag-of-words vectors, whose cosine
+    # scores sit far below a real embedding model's. Measured against the golden
+    # set, correct documents score 0.22-0.70 locally versus 0.6-0.8 on Titan, so
+    # the Bedrock-tuned threshold above filters out genuine matches and the demo
+    # answers "not found" to everything. Applied only when AI_PROVIDER=local.
+    local_relevance_threshold: float = 0.15
     max_output_tokens: int = 1024
     max_input_tokens: int = 8192
     chunk_size_tokens: int = 512
@@ -82,6 +120,8 @@ class Settings(BaseSettings):
     rate_limit_requests_per_min: int = 20
     rate_limit_server_requests_per_min: int = 10
     rate_limit_uploads_per_min: int = 5
+    # Sign-in and password-reset attempts, per client IP per minute.
+    rate_limit_auth_attempts_per_min: int = 10
 
     # -- security --------------------------------------------------------
     cors_allowed_origins: str = "http://localhost:3000"
@@ -92,6 +132,46 @@ class Settings(BaseSettings):
     langsmith_api_key: SecretStr | None = None
     langsmith_project: str = "ekba-dev"
     langsmith_tracing: bool = False
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _check_database_url(cls, v: str) -> str:
+        """Catch the common .env mistakes with a message that names the problem.
+
+        SQLAlchemy's own error for these is an opaque "Could not parse URL",
+        which sends people hunting in the wrong place.
+        """
+        if not isinstance(v, str):
+            return v
+        url = v.strip().strip('"').strip("'")
+
+        if not url:
+            raise ValueError("DATABASE_URL is empty. Set it in .env.")
+
+        if url.startswith("="):
+            raise ValueError(
+                "DATABASE_URL starts with '=' - you have a double equals in .env. "
+                "It should read DATABASE_URL=postgresql+asyncpg://... (one '=')."
+            )
+
+        if "://" not in url:
+            raise ValueError(
+                f"DATABASE_URL is not a URL: {url[:30]!r}. "
+                "Expected postgresql+asyncpg://user:password@host:5432/dbname"
+            )
+
+        # This app uses an async engine, which needs the asyncpg driver.
+        # A bare postgresql:// otherwise fails much later with a confusing error.
+        scheme = url.split("://", 1)[0]
+        if scheme == "postgresql":
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        elif scheme not in ("postgresql+asyncpg", "sqlite+aiosqlite"):
+            raise ValueError(
+                f"DATABASE_URL uses the {scheme!r} driver, which is not async. "
+                "Use postgresql+asyncpg://"
+            )
+
+        return url
 
     @field_validator("cors_allowed_origins", "trusted_hosts")
     @classmethod
@@ -109,8 +189,34 @@ class Settings(BaseSettings):
         return [h.strip() for h in self.trusted_hosts.split(",") if h.strip()]
 
     @property
+    def embedding_dimension(self) -> int:
+        """Vector size for the active embedding model / Qdrant collection."""
+        return self.bedrock_embedding_dimension
+
+    @property
+    def effective_chat_model_id(self) -> str:
+        """Chat model for the configured LLM_PROVIDER without RAG code changes."""
+        if self.llm_provider == "bedrock":
+            return self.llm_model or self.bedrock_chat_primary_model_id
+        if self.llm_provider == "groq":
+            return self.llm_model
+        return "local-dev-stub"
+
+    @property
     def is_dev(self) -> bool:
         return self.environment == "dev"
+
+    @property
+    def effective_relevance_threshold(self) -> float:
+        """Relevance cutoff matched to the embedding model actually in use.
+
+        A threshold is a property of the embedding model's score distribution,
+        not a universal constant - so it moves with the provider rather than
+        being tuned to whichever one happens to be configured.
+        """
+        if self.ai_provider == "local":
+            return self.local_relevance_threshold
+        return self.relevance_threshold
 
     @property
     def cognito_issuer(self) -> str:

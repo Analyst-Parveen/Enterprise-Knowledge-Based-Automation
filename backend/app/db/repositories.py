@@ -18,19 +18,22 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import RequestContext, get_correlation_id
-from app.core.exceptions import TenantIsolationError
+from app.core.exceptions import NotFoundError, TenantIsolationError
 from app.core.logging import log_security_event
 from app.db.models import (
     AuditEvent,
     Conversation,
+    Department,
     Document,
     DocumentStatus,
     IngestionJob,
     JobStatus,
     Message,
     RequestUsage,
+    Tenant,
     User,
     UserFeedback,
+    UserRole,
 )
 
 
@@ -46,10 +49,18 @@ async def record_audit(
     resource_type: str | None = None,
     resource_id: str | None = None,
     reason: str | None = None,
+    tenant_id: str | None = None,
     **details: Any,
 ) -> AuditEvent:
+    """Write one audit row.
+
+    `tenant_id` overrides the actor's tenant, for the few control-plane actions
+    whose subject is a different tenant than the actor: a platform operator
+    onboarding a company files the event under *that company*, so the company's
+    own admins can see how they came to exist. The actor is recorded in details.
+    """
     event = AuditEvent(
-        tenant_id=ctx.tenant_id if ctx else None,
+        tenant_id=tenant_id or (ctx.tenant_id if ctx else None),
         user_id=ctx.user_id if ctx else None,
         correlation_id=get_correlation_id() or None,
         event_type=event_type,
@@ -302,6 +313,156 @@ async def daily_spend(session: AsyncSession, ctx: RequestContext) -> float:
 async def get_user_by_sub(session: AsyncSession, cognito_sub: str) -> User | None:
     stmt = select(User).where(User.cognito_sub == cognito_sub)
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def mark_login(session: AsyncSession, *, subject: str) -> None:
+    """Stamp last_login_at for a successful sign-in.
+
+    Looked up by Cognito subject or local user id — never by a client-supplied
+    tenant. Best-effort: a missing row or a test stub without ``execute`` must
+    never fail the sign-in itself.
+    """
+    execute = getattr(session, "execute", None)
+    if not callable(execute):
+        return
+    await execute(
+        update(User)
+        .where((User.cognito_sub == subject) | (User.id == subject))
+        .values(last_login_at=datetime.now(UTC))
+    )
+
+
+async def tenant_is_suspended(session: AsyncSession, tenant_id: str) -> bool:
+    """True only for a registered company that a platform operator suspended.
+
+    A tenant with no registry row is not treated as suspended, so tenants that
+    predate the registry keep working exactly as before.
+    """
+    is_active = (
+        await session.execute(select(Tenant.is_active).where(Tenant.id == tenant_id))
+    ).scalar_one_or_none()
+    return is_active is False
+
+
+async def get_own_tenant(session: AsyncSession, ctx: RequestContext) -> Tenant:
+    """The caller's own company. There is no parameter for anyone else's."""
+    tenant = (
+        await session.execute(select(Tenant).where(Tenant.id == ctx.tenant_id))
+    ).scalar_one_or_none()
+    if tenant is None:
+        raise NotFoundError("Company not found.")
+    return tenant
+
+
+async def list_tenant_users(
+    session: AsyncSession,
+    ctx: RequestContext,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    include_inactive: bool = True,
+) -> tuple[Sequence[User], int]:
+    """Users of the caller's own tenant. The filter is not optional."""
+    conditions = [User.tenant_id == ctx.tenant_id]
+    if not include_inactive:
+        conditions.append(User.is_active.is_(True))
+
+    total = (await session.execute(select(func.count(User.id)).where(*conditions))).scalar_one()
+    rows = (
+        (
+            await session.execute(
+                select(User)
+                .where(*conditions)
+                .order_by(User.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return rows, int(total)
+
+
+async def get_tenant_user(session: AsyncSession, ctx: RequestContext, user_id: str) -> User:
+    """Fetch one user of the caller's tenant, or refuse.
+
+    A user id belonging to another tenant is reported as not found and recorded
+    as a cross-tenant attempt - the caller learns nothing either way.
+    """
+    user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+
+    if user is None:
+        raise NotFoundError("User not found.")
+    if user.tenant_id != ctx.tenant_id:
+        await record_audit(
+            session,
+            event_type="tenant.cross_tenant_user_access",
+            ctx=ctx,
+            severity="critical",
+            resource_type="user",
+            resource_id=user_id,
+            reason="user_belongs_to_another_tenant",
+        )
+        log_security_event(
+            "tenant.cross_tenant_user_access",
+            reason="user_belongs_to_another_tenant",
+            severity="critical",
+        )
+        raise TenantIsolationError()
+    return user
+
+
+async def find_tenant_user_by_email(
+    session: AsyncSession, ctx: RequestContext, email: str
+) -> User | None:
+    stmt = select(User).where(User.tenant_id == ctx.tenant_id, User.email == email)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def create_tenant_user(
+    session: AsyncSession,
+    ctx: RequestContext,
+    *,
+    email: str,
+    role: UserRole,
+    tenant_id: str | None = None,
+    department: Department | None = None,
+    display_name: str | None = None,
+    cognito_sub: str | None = None,
+) -> User:
+    """Insert a user row.
+
+    `tenant_id` defaults to the caller's own tenant. It is only ever passed
+    explicitly by the platform onboarding route, which has just created that
+    tenant itself and records an audit event naming the actor.
+    """
+    user = User(
+        tenant_id=tenant_id or ctx.tenant_id,
+        email=email,
+        role=role,
+        department=department,
+        display_name=display_name,
+        cognito_sub=cognito_sub,
+        invited_by=ctx.user_id,
+    )
+    session.add(user)
+    await session.flush()
+    return user
+
+
+async def count_active_admins(
+    session: AsyncSession, tenant_id: str, *, excluding_user_id: str | None = None
+) -> int:
+    """How many active admins a company would still have."""
+    conditions = [
+        User.tenant_id == tenant_id,
+        User.role == UserRole.ADMIN,
+        User.is_active.is_(True),
+    ]
+    if excluding_user_id:
+        conditions.append(User.id != excluding_user_id)
+    return int((await session.execute(select(func.count(User.id)).where(*conditions))).scalar_one())
 
 
 async def add_feedback(

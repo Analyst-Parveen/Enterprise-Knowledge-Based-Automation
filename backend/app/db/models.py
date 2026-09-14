@@ -64,6 +64,9 @@ class Department(str, enum.Enum):
 class UserRole(str, enum.Enum):
     USER = "user"
     ADMIN = "admin"
+    # Service-provider operator. Lives only in the reserved platform tenant and
+    # is the only role permitted to create a tenant. See core/context.py.
+    PLATFORM_ADMIN = "platform_admin"
 
 
 class DocumentStatus(str, enum.Enum):
@@ -102,6 +105,10 @@ class Tenant(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     slug: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Primary contact for the company, captured at onboarding. Not a credential.
+    contact_email: Mapped[str | None] = mapped_column(String(320))
+    # The platform operator who onboarded this company.
+    created_by: Mapped[str | None] = mapped_column(String(64))
 
     users: Mapped[list[User]] = relationship(back_populates="tenant")
 
@@ -127,6 +134,9 @@ class User(Base, TimestampMixin):
     department: Mapped[Department | None] = mapped_column(Enum(Department, name="department"))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Who issued the invitation. A platform operator for a first tenant admin,
+    # a tenant admin for everybody else.
+    invited_by: Mapped[str | None] = mapped_column(String(64))
 
     tenant: Mapped[Tenant] = relationship(back_populates="users")
 

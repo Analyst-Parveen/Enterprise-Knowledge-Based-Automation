@@ -168,7 +168,7 @@ async def answer_question(
     )
 
     # -- 7. relevance threshold ------------------------------------------
-    hits = [h for h in hits if h.score >= settings.relevance_threshold]
+    hits = [h for h in hits if h.score >= settings.effective_relevance_threshold]
 
     if not hits:
         latency = elapsed_ms()

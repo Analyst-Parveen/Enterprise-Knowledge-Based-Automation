@@ -31,6 +31,17 @@ terraform state list                              # confirm this project's resou
 
 Any mismatch stops the workflow.
 
+There are three states — know which one you are in:
+
+| Directory | Lifecycle | Notes |
+|---|---|---|
+| `envs/baseline` | protected, never destroyed | ECR, S3, Cognito, secrets, budget, audit logs, OIDC role |
+| `envs/cost-guard` | protected, never destroyed | Kill switch. `backend.hcl` is hand-written (`bootstrap-state.sh` does not create it). `dry_run` changes need explicit user approval |
+| `envs/dev` | ephemeral | Apply only through `scripts/deploy.sh` (it supplies `backend_image`) |
+
+On Windows, run Terraform from Git Bash. In PowerShell 5.1, quote flags such as
+`"-chdir=$dir"` and `"-backend-config=backend.hcl"`, or they are mangled.
+
 ## Standard change workflow
 
 ```bash
@@ -39,6 +50,10 @@ terraform validate
 tflint ; checkov -d .                 # security scan
 terraform plan -out=tfplan
 ```
+
+`tflint` and `checkov` are not installed on the current workstation; CI runs the
+Terraform security scan. When they cannot run locally, say so in the report
+rather than implying a scan happened.
 
 **Then read the plan carefully.** Specifically look for:
 
@@ -72,7 +87,8 @@ The workflow must, in order:
 3. Show the user that list and require a typed confirmation phrase — not `y`.
 4. Refuse to touch anything tagged `Lifecycle = "protected"`.
 5. Preserve: Secrets Manager secrets, the Terraform state backend, the ECR
-   repository and its images, budgets/alarms, and retained audit log groups.
+   repository and its images, budgets/alarms, retained audit log groups, and the
+   cost guard.
 6. Destroy only resources in this project's state.
 7. Write an audit record of what was destroyed to `docs/reports/`.
 
@@ -100,15 +116,25 @@ drift you did not cause, and never "fix" drift by deleting a resource.
 reject anything that does not fit.
 
 **These resources must not appear in the plan at all** — if one does, it is a bug:
-`aws_nat_gateway`, `aws_db_instance`, `aws_elasticache_*`, `aws_eks_*`,
-`aws_efs_*`.
+`aws_nat_gateway`, `aws_elasticache_*`, `aws_eks_*`, `aws_efs_*`.
 
-Postgres, Qdrant, and Redis are containers in the Fargate task, not managed
+Exactly one `aws_db_instance` is expected: `ekba-dev-postgres` from
+`modules/database` (`db.t4g.micro`, single-AZ, private, encrypted, write-only
+password). A second one, a bigger class, Multi-AZ or `publicly_accessible = true`
+is a bug. Qdrant and Redis are containers in the Fargate task, not managed
 services. The task runs in a public subnet with `assign_public_ip = true` so it
-reaches ECR without a NAT Gateway. Smallest viable sizing (1 vCPU / 2 GB) by
-default. ALB ingress restricted to `DEMO_ALLOWED_CIDR`, never `0.0.0.0/0`.
+reaches ECR without a NAT Gateway; the private subnets have no internet route and
+hold only the database. Smallest viable sizing (1 vCPU / 3 GB, three containers)
+by default. ALB ingress restricted to `allowed_cidrs` (one operator
+`/32` in `envs/dev/terraform.tfvars`; `DEMO_ALLOWED_CIDR` in the GitHub
+workflow), never `0.0.0.0/0`. When the operator's IP changes, updating it is a
+one-resource, in-place security-group change.
 
-Run `scripts/cost-check.sh` before and after every session.
+The stack burns ~$0.11/hour (including RDS). Cost is measured gross of credits;
+the cost guard stops it — ECS to zero, ALB deleted, RDS stopped — at $18 of gross
+usage once armed. A plan that would destroy `aws_db_instance` outside
+`destroy.sh` is a bug: the data lives there. Run `scripts/cost-check.sh` before and
+after every session.
 
 ## Never
 

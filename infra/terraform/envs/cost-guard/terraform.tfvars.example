@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars and fill in. NEVER commit terraform.tfvars.
+
+expected_aws_account_id = "123456789012"
+aws_region              = "us-west-2"
+environment             = "dev"
+
+alert_email = "you@example.com"
+
+# Gross usage, credits EXCLUDED, cumulative from tracking_start.
+ceiling_usd            = 20
+warning_thresholds_usd = [10, 15]
+shutdown_usd           = 18
+tracking_start         = "2026-09-01_00:00"
+
+# Any after-credit (card) charge in a month stops the environment.
+card_charge_threshold_usd = 0.01
+
+# The hourly check stops an environment that has existed longer than this.
+max_session_hours = 8
+
+# Start in dry-run. Turn off only after reviewing a dry-run report.
+dry_run = true
+
+tfstate_bucket = "ekba-tfstate-123456789012"
