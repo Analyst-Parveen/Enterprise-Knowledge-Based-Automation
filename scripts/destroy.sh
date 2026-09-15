@@ -61,9 +61,31 @@ printf '%s\n' "$STATE_RESOURCES" | sed 's/^/    /'
 # ---------------------------------------------------------------------------
 # Guard 3: produce a DESTROY PLAN and show exactly what would be destroyed
 # ---------------------------------------------------------------------------
+# backend_image is required and has no default: deploy.sh passes the image it
+# built. A destroy plan still needs a value, so read the real one from the task
+# definition revision this state tracks (the same api-container lookup
+# deploy-frontend.sh uses). BACKEND_IMAGE=<ECR image URI> overrides it, e.g.
+# when an interrupted destroy already removed the task definition.
+step "Resolving backend_image from the task definition in this state"
+BACKEND_IMAGE="${BACKEND_IMAGE:-}"
+if [ -z "$BACKEND_IMAGE" ]; then
+  TASK_DEF_ARN="$(terraform -chdir="$TF_DIR" state show -no-color 'module.service.aws_ecs_task_definition.app' 2>/dev/null \
+    | sed -nE 's/^[[:space:]]*arn[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' | head -1 || true)"
+  if [ -n "$TASK_DEF_ARN" ]; then
+    BACKEND_IMAGE="$(aws ecs describe-task-definition --task-definition "$TASK_DEF_ARN" --region "$AWS_REGION" \
+      --query "taskDefinition.containerDefinitions[?name=='api'] | [0].image" --output text 2>/dev/null | tr -d '\r' || true)"
+  fi
+fi
+case "$BACKEND_IMAGE" in
+  ""|None)
+    die "could not read backend_image from the task definition in this state. NOTHING was destroyed. Rerun with BACKEND_IMAGE=<ECR image URI>." ;;
+esac
+ok "backend_image: ${BACKEND_IMAGE}"
+
 step "Generating destroy plan"
 terraform -chdir="$TF_DIR" plan -destroy -input=false -out=tfdestroyplan \
-  -var="environment=${ENVIRONMENT}" || die "destroy plan failed"
+  -var="environment=${ENVIRONMENT}" \
+  -var="backend_image=${BACKEND_IMAGE}" || die "destroy plan failed"
 
 printf '\n%s--- RESOURCES THAT WILL BE DESTROYED ---%s\n' "$C_RED" "$C_RST"
 terraform -chdir="$TF_DIR" show -no-color tfdestroyplan \
