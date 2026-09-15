@@ -21,6 +21,8 @@ on:
       - infra/docker/backend.Dockerfile
       - .github/workflows/deploy.yml
       - .github/workflows/ci.yml
+      - scripts/verify.sh
+      - scripts/_common.sh
   workflow_dispatch:
     inputs:
       environment:
