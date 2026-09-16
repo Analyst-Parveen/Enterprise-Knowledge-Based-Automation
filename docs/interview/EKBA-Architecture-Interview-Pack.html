@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>EKBA — Code-Based Architecture Interview Pack</title>
+<style>
+  :root {
+    --ink: #1a1f2e;
+    --muted: #5a6577;
+    --line: #d8dee8;
+    --accent: #0f4c81;
+    --bg: #ffffff;
+    --soft: #f4f7fb;
+    --ok: #0d6b4c;
+    --warn: #8a5a00;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", Calibri, Arial, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    line-height: 1.45;
+    font-size: 11pt;
+    margin: 0;
+    padding: 28px 36px 48px;
+  }
+  h1 {
+    font-size: 22pt;
+    color: var(--accent);
+    margin: 0 0 6px;
+    border-bottom: 3px solid var(--accent);
+    padding-bottom: 10px;
+  }
+  h2 {
+    font-size: 14pt;
+    color: var(--accent);
+    margin: 28px 0 10px;
+    padding-top: 6px;
+    border-top: 1px solid var(--line);
+    page-break-after: avoid;
+  }
+  h3 {
+    font-size: 12pt;
+    margin: 16px 0 6px;
+    color: #243247;
+    page-break-after: avoid;
+  }
+  p, li { margin: 0 0 8px; }
+  .meta {
+    color: var(--muted);
+    font-size: 10pt;
+    margin-bottom: 18px;
+  }
+  .badge {
+    display: inline-block;
+    background: var(--soft);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 9pt;
+    margin-right: 6px;
+  }
+  .ni { color: var(--warn); font-weight: 600; }
+  .ok { color: var(--ok); font-weight: 600; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0 14px;
+    font-size: 10pt;
+    page-break-inside: auto;
+  }
+  th, td {
+    border: 1px solid var(--line);
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: var(--soft);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  tr { page-break-inside: avoid; }
+  code, .mono {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 9.5pt;
+    background: var(--soft);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--soft);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 12px 14px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 9pt;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    page-break-inside: avoid;
+  }
+  .callout {
+    background: var(--soft);
+    border-left: 4px solid var(--accent);
+    padding: 10px 12px;
+    margin: 12px 0;
+  }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc li { margin-bottom: 4px; }
+  .flow {
+    font-family: Consolas, monospace;
+    font-size: 9.5pt;
+    line-height: 1.35;
+  }
+  ul.compact li { margin-bottom: 3px; }
+  .footer {
+    margin-top: 36px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 9pt;
+  }
+  @media print {
+    body { padding: 12mm 14mm; }
+    h2 { page-break-before: auto; }
+    a { color: inherit; text-decoration: none; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Enterprise Knowledge-Based Automation<br/>Code-Based Architecture &amp; Interview Pack</h1>
+<p class="meta">
+  <span class="badge">Read-only analysis</span>
+  <span class="badge">Source: repository code / Terraform / scripts / workflows</span>
+  <span class="badge">No secrets included</span>
+</p>
+
+<div class="callout">
+  <strong>Important:</strong> <code>PROJECT.md</code> still describes “Bedrock only” and “Qdrant as container only.”
+  <strong>Live AWS config and application code</strong> use <strong>Cohere embeddings + Groq chat + Qdrant Cloud</strong>, with Bedrock remaining selectable via configuration.
+  This document follows <strong>code + Terraform</strong>.
+</div>
+
+<h2>Table of Contents</h2>
+<ol class="toc">
+  <li>Executive Summary</li>
+  <li>Technology Stack</li>
+  <li>Complete Architecture</li>
+  <li>Request Flows</li>
+  <li>Master Realistic Example</li>
+  <li>Embedding Model</li>
+  <li>LLM</li>
+  <li>RAG Pipeline</li>
+  <li>Qdrant</li>
+  <li>PostgreSQL / RDS</li>
+  <li>S3</li>
+  <li>Cognito</li>
+  <li>Security</li>
+  <li>ALB</li>
+  <li>Blue-Green Deployment</li>
+  <li>GitHub Actions</li>
+  <li>Terraform &amp; Lifecycle Scripts</li>
+  <li>Redis</li>
+  <li>CloudWatch</li>
+  <li>Secrets Manager (names only)</li>
+  <li>API Endpoint Map</li>
+  <li>Data Lifecycle</li>
+  <li>Destroy → Deploy Lifecycle</li>
+  <li>Interview Speeches</li>
+  <li>Interview Q&amp;A</li>
+  <li>Final Master Flow</li>
+  <li>File / Code References</li>
+  <li>NOT IMPLEMENTED</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2>1. Executive Summary</h2>
+<p>
+  This project is a <strong>multi-tenant enterprise RAG + agentic automation</strong> platform.
+  Companies upload policies/SOPs; authenticated users ask questions; answers are produced by
+  <strong>tenant-filtered vector retrieval + an LLM</strong>, with <strong>citation validation and guardrails</strong>.
+</p>
+<p><strong>Who uses it</strong></p>
+<ul class="compact">
+  <li><code>platform_admin</code> (tenant <code>platform</code>) — creates companies; invites each company’s first admin</li>
+  <li>company <code>admin</code> — manages users <strong>inside its own company only</strong></li>
+  <li><code>user</code> — upload / chat within own tenant</li>
+</ul>
+<p><strong>Live AWS AI path</strong> (<code>infra/terraform/envs/dev/main.tf</code>):</p>
+<ul class="compact">
+  <li><code>AI_PROVIDER=hybrid</code></li>
+  <li><code>EMBED_PROVIDER=cohere</code> → <code>embed-multilingual-v3.0</code> (1024-d)</li>
+  <li><code>LLM_PROVIDER=groq</code> → <code>openai/gpt-oss-20b</code></li>
+  <li><code>QDRANT_COLLECTION=ekba_chunks</code>, distance <strong>COSINE</strong>, Qdrant Cloud URL</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>2. Technology Stack</h2>
+<table>
+  <tr><th>Layer</th><th>Actual technology in this repo</th></tr>
+  <tr><td>Frontend</td><td>Next.js 15.1.3, React 19, TypeScript, Tailwind — hosted on AWS Amplify</td></tr>
+  <tr><td>Backend</td><td>Python 3.12, FastAPI, Pydantic, SQLAlchemy async, Alembic</td></tr>
+  <tr><td>Auth</td><td>Amazon Cognito (ID token JWT). Dev auth only if <code>ENVIRONMENT=dev</code> + <code>DEV_AUTH_ENABLED=true</code></td></tr>
+  <tr><td>RBAC</td><td>Cognito custom claims <code>custom:tenant_id</code>, <code>custom:role</code></td></tr>
+  <tr><td>Database</td><td>PostgreSQL 16 local / Amazon RDS <code>ekba-dev-postgres</code> (<code>db.t4g.micro</code>)</td></tr>
+  <tr><td>Vector DB</td><td>Qdrant (local Docker or Qdrant Cloud). Collection <code>ekba_chunks</code></td></tr>
+  <tr><td>Cache</td><td>Redis 7 sidecar (<code>redis:7-alpine</code>). No ElastiCache</td></tr>
+  <tr><td>Storage</td><td>Amazon S3 documents bucket (local MinIO via <code>S3_ENDPOINT_URL</code>)</td></tr>
+  <tr><td>Embeddings (ACTIVE)</td><td>Cohere <code>embed-multilingual-v3.0</code></td></tr>
+  <tr><td>Embeddings (ALT)</td><td>Bedrock Titan <code>amazon.titan-embed-text-v2:0</code> (config switch)</td></tr>
+  <tr><td>LLM (ACTIVE)</td><td>Groq <code>openai/gpt-oss-20b</code></td></tr>
+  <tr><td>LLM (ALT / fallback)</td><td>Bedrock Nova <code>us.amazon.nova-lite-v1:0</code> → fallback <code>us.amazon.nova-micro-v1:0</code></td></tr>
+  <tr><td>Vision</td><td>Bedrock Nova Lite <code>describe_image</code></td></tr>
+  <tr><td>STT (upload media)</td><td>Amazon Transcribe</td></tr>
+  <tr><td>STT (chat mic)</td><td>Browser Web Speech API (frontend)</td></tr>
+  <tr><td>TTS</td><td class="ni">NOT IMPLEMENTED</td></tr>
+  <tr><td>OCR service</td><td class="ni">NOT IMPLEMENTED — PDF uses pypdf text extract; images use vision</td></tr>
+  <tr><td>Agents</td><td>LangGraph</td></tr>
+  <tr><td>Deploy</td><td>Terraform, ECR, ECS Fargate, CodeDeploy blue-green, CloudFront, Amplify</td></tr>
+  <tr><td>CI/CD</td><td><code>.github/workflows/ci.yml</code>, <code>deploy.yml</code> (OIDC) + <code>scripts/deploy.sh</code></td></tr>
+  <tr><td>Observability</td><td>CloudWatch <code>/ekba/dev/service</code>; LangSmith optional</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3. Complete Architecture</h2>
+<pre class="flow">User Browser
+  ├─► Amplify (Next.js UI) ── HTTPS
+  └─► CloudFront (API HTTPS edge)
+        └─► ALB ekba-dev-alb
+              ├─ :80  production → TG ekba-dev-blue  (or green after shift)
+              └─ :8080 test      → TG ekba-dev-green (CodeDeploy health)
+                    └─► ECS Fargate task ekba-dev  (PUBLIC subnets, assign_public_ip=true)
+                          ├─ api (FastAPI :8000)
+                          ├─ redis sidecar :6379
+                          └─ qdrant sidecar (still started; UNUSED when QDRANT_URL=Cloud)
+
+FastAPI talks to:
+  Cognito (JWT JWKS) | RDS ekba-dev-postgres (private subnets)
+  S3 documents       | Secrets Manager ekba/dev/*
+  Qdrant Cloud       | Cohere Embed | Groq Chat
+  Bedrock (vision / optional providers) | Transcribe (media)
+  CloudWatch logs
+
+CI/CD:
+  GitHub → Actions OIDC → ECR ekba-dev-backend → CodeDeploy ekba-dev / ekba-dev-dg
+</pre>
+
+<div class="callout">
+  <strong>Network fact:</strong> There is <strong>no NAT Gateway</strong>.
+  ECS tasks run in <strong>public subnets</strong> with public IPs.
+  RDS runs in <strong>private subnets</strong>, reachable only from the tasks security group.
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Request Flows</h2>
+<p>Auth principal: Bearer <strong>Cognito ID token</strong> → <code>verify_token</code> (<code>backend/app/core/auth.py</code>) →
+<code>RequestContext.tenant_id</code> / <code>role</code> from verified claims only (never from request body).</p>
+
+<h3>A) Login</h3>
+<ol>
+  <li>Frontend → <code>POST /api/v1/auth/login</code></li>
+  <li>Anonymous rate limit → Cognito <code>USER_PASSWORD_AUTH</code> (or local dev auth)</li>
+  <li>Returns ID token + refresh; stamps <code>users.last_login_at</code>; audit <code>auth.login_succeeded</code></li>
+</ol>
+
+<h3>B) Company creation</h3>
+<p><code>POST /api/v1/platform/tenants</code> — requires <code>PlatformAdminUser</code> → row in <code>tenants</code> via control plane.</p>
+
+<h3>C) User invitation</h3>
+<ul class="compact">
+  <li>First company admin: <code>POST /api/v1/platform/tenants/{tenant_id}/admins</code></li>
+  <li>Inside company: <code>POST /api/v1/admin/users</code> (roles limited to <code>user</code>/<code>admin</code>)</li>
+  <li>Writes Postgres user + Cognito invite (OTP password; app never stores passwords)</li>
+</ul>
+
+<h3>D–O) Other flows (summary)</h3>
+<table>
+  <tr><th>Flow</th><th>Endpoint / entry</th><th>Key side effects</th></tr>
+  <tr><td>Upload</td><td><code>POST /api/v1/documents</code></td><td>S3 put + <code>documents</code> + <code>ingestion_jobs</code> + background ingest</td></tr>
+  <tr><td>Extract</td><td><code>ingestion/extractors.py</code></td><td>pypdf / docx / csv / vision / Transcribe</td></tr>
+  <tr><td>Chunk</td><td><code>chunker.py</code></td><td>512 tokens, overlap 64</td></tr>
+  <tr><td>Embed</td><td><code>get_provider().embed</code></td><td>Cohere (batches of 25 in ingestion)</td></tr>
+  <tr><td>Upsert</td><td><code>vector.upsert_chunks</code></td><td>Qdrant; <code>tenant_id</code> mandatory</td></tr>
+  <tr><td>RAG Q&amp;A</td><td><code>POST /api/v1/chat</code></td><td>See §8</td></tr>
+  <tr><td>Feedback</td><td><code>POST /api/v1/feedback</code></td><td><code>user_feedback</code></td></tr>
+  <tr><td>Logout</td><td><code>POST /api/v1/auth/logout</code></td><td>Cognito global sign-out</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>5. Master Realistic Example</h2>
+<pre class="flow">Company tenant + user "Rahul"
+  → POST /api/v1/auth/login → Cognito ID token (custom:tenant_id, custom:role)
+  → CloudFront → ALB :80 → ECS FastAPI
+  → POST /api/v1/documents  (Employee Travel Policy.pdf)
+  → S3 key: {tenant_id}/{uuid}.pdf  (AES256)
+  → Postgres documents + ingestion_jobs
+  → Background: pypdf extract → chunk 512/64
+  → Cohere embed-multilingual-v3.0 (1024-d)
+  → Qdrant Cloud collection ekba_chunks (tenant-scoped upsert)
+  → POST /api/v1/chat  "What is the daily meal allowance?"
+  → injection scan → question embed → Redis semantic cache miss
+  → Qdrant search MUST filter tenant_id (+ exclude suspicious=true)
+  → score ≥ 0.35 → BM25+vector rerank → top_k=8
+  → SYSTEM_PROMPT + sources → Groq openai/gpt-oss-20b
+  → citation validation + output guardrail
+  → answer + citations → usage/messages → UI
+</pre>
+
+<!-- ============================================================ -->
+<h2>6. Embedding Model</h2>
+<table>
+  <tr><th>Item</th><th>Value</th></tr>
+  <tr><td>ACTIVE (AWS hybrid)</td><td>Cohere <code>embed-multilingual-v3.0</code>, dimension <strong>1024</strong></td></tr>
+  <tr><td>Code</td><td><code>CohereEmbeddingBackend</code> in <code>backend/app/services/ai/provider.py</code></td></tr>
+  <tr><td>Env</td><td><code>EMBED_PROVIDER</code>, <code>COHERE_API_KEY</code>, <code>COHERE_EMBED_MODEL</code>, dim via <code>BEDROCK_EMBEDDING_DIMENSION</code> / <code>embedding_dimension</code></td></tr>
+  <tr><td>Distance</td><td>COSINE in Qdrant</td></tr>
+  <tr><td>Query vs doc</td><td>Cohere <code>input_type=search_query</code> (1 text) else <code>search_document</code></td></tr>
+  <tr><td>Ingestion batch</td><td>25 texts per embed call</td></tr>
+  <tr><td>Automatic fallback model</td><td class="ni">NOT IMPLEMENTED — failure raises UpstreamError</td></tr>
+  <tr><td>Config alternative</td><td><code>EMBED_PROVIDER=bedrock</code> → Titan <code>amazon.titan-embed-text-v2:0</code></td></tr>
+  <tr><td>Local stub</td><td><code>AI_PROVIDER=local</code> hashed bag-of-words</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>7. LLM</h2>
+<table>
+  <tr><th>Item</th><th>Value</th></tr>
+  <tr><td>ACTIVE</td><td>Groq <code>openai/gpt-oss-20b</code></td></tr>
+  <tr><td>API</td><td><code>GROQ_API_BASE</code> default <code>https://api.groq.com/openai/v1</code> + <code>/chat/completions</code></td></tr>
+  <tr><td>Env</td><td><code>LLM_PROVIDER</code>, <code>LLM_MODEL</code>, <code>GROQ_API_KEY</code></td></tr>
+  <tr><td>RAG call</td><td>temperature <strong>0.1</strong>, <code>max_tokens=max_output_tokens</code> (1024)</td></tr>
+  <tr><td>Prompts</td><td><code>backend/app/services/rag/prompts.py</code></td></tr>
+  <tr><td>Bedrock optional</td><td>Primary <code>us.amazon.nova-lite-v1:0</code>; fallback <code>us.amazon.nova-micro-v1:0</code> (Bedrock path only)</td></tr>
+  <tr><td>Groq automatic fallback</td><td class="ni">NOT IMPLEMENTED</td></tr>
+  <tr><td>Region (Bedrock)</td><td><code>us-west-2</code></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>8. RAG Pipeline</h2>
+<p>Exact order in <code>backend/app/services/rag/pipeline.py:answer_question</code>:</p>
+<ol>
+  <li>Authentication (route dependency)</li>
+  <li>Input validation (<code>validate_question</code>)</li>
+  <li>Prompt injection scan (<code>scan_input</code>) — may block</li>
+  <li>Embed question</li>
+  <li>Semantic cache (Redis, tenant-namespaced) — cache hit still runs output guardrail</li>
+  <li>Qdrant search — tenant filter built <em>inside</em> <code>vector.search</code> (cannot omit)</li>
+  <li>Relevance threshold: <strong>0.35</strong> (local stub uses <strong>0.15</strong>)</li>
+  <li>Over-fetch <code>top_k * 2</code> then BM25+vector rerank → <code>retrieval_top_k=8</code></li>
+  <li>Context construction + system prompt</li>
+  <li>LLM chat</li>
+  <li>Citation validation (<code>[S1]</code>… must match retrieved sources)</li>
+  <li>Output guardrail</li>
+  <li>Usage tracking (+ cache store if citations OK)</li>
+</ol>
+<p><strong>Reranking:</strong> local BM25 fusion (<code>rerank.py</code>, lexical weight 0.35) — not a hosted Cohere/Bedrock reranker.</p>
+<p><strong>Chunking:</strong> 512 / 64 tokens.</p>
+
+<!-- ============================================================ -->
+<h2>9. Qdrant</h2>
+<table>
+  <tr><th>Setting</th><th>Value</th></tr>
+  <tr><td>Collection</td><td><code>ekba_chunks</code></td></tr>
+  <tr><td>Dimension</td><td>1024</td></tr>
+  <tr><td>Distance</td><td>COSINE</td></tr>
+  <tr><td>Point id</td><td><code>chunk_id</code> (UUID)</td></tr>
+  <tr><td>Indexes</td><td><code>tenant_id</code>, <code>document_id</code>, <code>owner_id</code>, <code>department</code> (KEYWORD); <code>suspicious</code> (BOOL)</td></tr>
+</table>
+<pre>{
+  "id": "&lt;chunk_uuid&gt;",
+  "vector": [ /* 1024 floats */ ],
+  "payload": {
+    "document_id": "...",
+    "chunk_id": "...",
+    "document_name": "Employee Travel Policy.pdf",
+    "page_number": 3,
+    "source_uri": "s3://ekba-dev-documents-.../tenant/uuid.pdf",
+    "owner_id": "&lt;cognito_sub&gt;",
+    "tenant_id": "&lt;tenant_id&gt;",
+    "document_version": 1,
+    "created_by": "...",
+    "created_at": "ISO-8601",
+    "text": "chunk text...",
+    "modality": "text",
+    "department": "hr",
+    "section": null,
+    "suspicious": false
+  }
+}</pre>
+<p>Code: <code>backend/app/services/vector.py</code> (<code>ChunkPayload</code>, <code>ensure_collection</code>, <code>search</code>, <code>upsert_chunks</code>, <code>delete_document_chunks</code>).</p>
+<p><strong>Manual inspect:</strong> Qdrant Cloud console → collection <code>ekba_chunks</code> → filter by <code>tenant_id</code>.</p>
+
+<!-- ============================================================ -->
+<h2>10. PostgreSQL / RDS</h2>
+<p>Instance: <code>ekba-dev-postgres</code> (private subnets). Models: <code>backend/app/db/models.py</code>.</p>
+<table>
+  <tr><th>Group</th><th>Tables</th></tr>
+  <tr><td>TENANT</td><td><code>tenants</code></td></tr>
+  <tr><td>AUTH/USER</td><td><code>users</code></td></tr>
+  <tr><td>DOCUMENT</td><td><code>documents</code></td></tr>
+  <tr><td>INGESTION</td><td><code>ingestion_jobs</code></td></tr>
+  <tr><td>CHAT</td><td><code>conversations</code>, <code>messages</code></td></tr>
+  <tr><td>FEEDBACK</td><td><code>user_feedback</code></td></tr>
+  <tr><td>USAGE</td><td><code>request_usage</code></td></tr>
+  <tr><td>AUDIT</td><td><code>audit_events</code></td></tr>
+  <tr><td>OTHER</td><td><code>prompt_releases</code></td></tr>
+</table>
+<p><strong>Inspect:</strong> AWS RDS console / Query Editor / <code>psql</code> using password from Secrets Manager — never print secret values.</p>
+
+<!-- ============================================================ -->
+<h2>11. S3</h2>
+<ul class="compact">
+  <li>Bucket: <code>ekba-dev-documents-&lt;suffix&gt;</code> (baseline Terraform)</li>
+  <li>Key: <code>{tenant_id}/{uuid}.{ext}</code> via <code>files.build_storage_key</code></li>
+  <li>SSE: AES256</li>
+  <li>Reads/deletes assert key prefix matches caller tenant</li>
+  <li>Stores originals only — vectors in Qdrant; metadata in Postgres</li>
+</ul>
+<p>Example key: <code>infinity-assurance/a1b2c3d4e5f6….pdf</code></p>
+
+<!-- ============================================================ -->
+<h2>12. Cognito</h2>
+<ul class="compact">
+  <li>User pool name: <code>ekba-dev-users</code></li>
+  <li>App client name: <code>ekba-dev-web</code> (public SPA client)</li>
+  <li>Custom attributes: <code>custom:tenant_id</code>, <code>custom:role</code></li>
+  <li>API uses <strong>ID token</strong> (carries custom claims)</li>
+  <li>Verification: JWKS, issuer, audience, expiry</li>
+  <li><code>platform_admin</code> ⇔ tenant id <code>platform</code> (enforced together)</li>
+  <li>Passwords never stored/set by the application</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>13. Security</h2>
+<table>
+  <tr><th>Layer</th><th>Protects</th><th>Where</th></tr>
+  <tr><td>Cognito JWT</td><td>Authentication</td><td><code>core/auth.py</code></td></tr>
+  <tr><td>RBAC deps</td><td>Authorization</td><td><code>api/deps.py</code></td></tr>
+  <tr><td>Tenant isolation</td><td>Cross-company data leak</td><td>JWT tenant → SQL / S3 prefix / Qdrant filter</td></tr>
+  <tr><td>Secrets Manager</td><td>API keys &amp; DB password</td><td>ECS task secrets</td></tr>
+  <tr><td>VPC + SG</td><td>Network exposure</td><td>ALB <code>allowed_cidrs</code>; DB only from tasks</td></tr>
+  <tr><td>CloudFront</td><td>HTTPS to clients</td><td>ALB remains HTTP</td></tr>
+  <tr><td>Injection / guardrails</td><td>Prompt abuse / unsafe output</td><td><code>security/injection.py</code>, <code>rag/guardrails.py</code></td></tr>
+  <tr><td>Rate limits</td><td>Abuse</td><td>Redis <code>core/ratelimit.py</code></td></tr>
+  <tr><td>Upload safety</td><td>Malicious files</td><td>extension + magic bytes + size</td></tr>
+  <tr><td>OIDC deploy</td><td>No long-lived AWS keys in Actions</td><td><code>ekba-dev-github-deploy</code></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>14. ALB</h2>
+<pre class="flow">Internet → CloudFront → ALB :80 → Target Group (blue/green) → ECS :8000 FastAPI
+                       ALB :8080 (test) → green TG before traffic shift
+</pre>
+<ul class="compact">
+  <li>Names: <code>ekba-dev-alb</code>, <code>ekba-dev-blue</code>, <code>ekba-dev-green</code></li>
+  <li>Health check path: <code>/api/v1/health</code></li>
+  <li>If a task dies: target becomes unhealthy; ALB stops sending traffic; CodeDeploy can auto-rollback on 5xx alarm</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>15. Blue-Green Deployment</h2>
+<pre class="flow">git push aws-deployment
+  → GitHub Actions CI
+  → Docker build → ECR :{git_sha}
+  → New ECS task definition revision (image swap)
+  → CodeDeploy app ekba-dev / group ekba-dev-dg
+  → Green health-checked on :8080
+  → Traffic shifts to green (CodeDeployDefault.ECSAllAtOnce)
+  → Blue kept for rollback_window_minutes, then terminated
+</pre>
+<p>Infra / env / secret changes still go through <code>./scripts/deploy.sh</code> (GHA does <strong>not</strong> apply Terraform for <code>envs/dev</code>).</p>
+<p><code>scripts/rollback.sh</code>: CodeDeploy traffic rollback is <span class="ni">NOT IMPLEMENTED</span> (placeholder TODO).</p>
+
+<!-- ============================================================ -->
+<h2>16. GitHub Actions</h2>
+<table>
+  <tr><th>Workflow</th><th>Trigger</th><th>What it does</th></tr>
+  <tr><td><code>ci.yml</code></td><td>push main/develop; PRs; called by deploy</td><td>lint, pytest, frontend, terraform validate, docker build</td></tr>
+  <tr><td><code>deploy.yml</code></td><td>push <code>aws-deployment</code> (backend paths) or manual</td><td>OIDC → ECR → CodeDeploy → verify via <code>API_URL</code></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>17. Terraform &amp; Lifecycle Scripts</h2>
+<table>
+  <tr><th>State</th><th>Lifecycle</th><th>Contents</th></tr>
+  <tr><td><code>envs/baseline</code></td><td>Protected</td><td>Cognito, ECR, S3 docs, Secrets containers, budget, OIDC role, audit log</td></tr>
+  <tr><td><code>envs/cost-guard</code></td><td>Protected</td><td>Kill-switch Lambda / budgets / SNS</td></tr>
+  <tr><td><code>envs/dev</code></td><td>Ephemeral</td><td>VPC, ALB, ECS, RDS, CodeDeploy</td></tr>
+  <tr><td><code>envs/frontend</code></td><td>Persistent</td><td>Amplify + CloudFront API</td></tr>
+</table>
+<ul class="compact">
+  <li><code>deploy.sh</code> — preflight, local tests, build/push, terraform apply <strong>dev</strong>, CodeDeploy, verify</li>
+  <li><code>destroy.sh</code> — snapshot RDS → destroy <strong>only</strong> dev state</li>
+  <li><code>deploy-frontend.sh</code> — Amplify + CloudFront + wire CORS/SG</li>
+  <li><code>verify.sh</code> — read-only health/readiness checks</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>18. Redis</h2>
+<ul class="compact">
+  <li>URL: <code>redis://localhost:6379/0</code> (sidecar; no persistence)</li>
+  <li>Rate-limit keys: <code>ekba:rl:{bucket}:{tenant}:{user}</code></li>
+  <li>Semantic cache: <code>ekba:sc:idx:{tenant}</code>, <code>ekba:sc:e:{tenant}:{digest}</code></li>
+  <li>TTL: <code>semantic_cache_ttl_seconds=3600</code>; similarity gate <strong>0.95</strong></li>
+  <li>Does <strong>not</strong> survive destroy / task replacement</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>19. CloudWatch</h2>
+<ul class="compact">
+  <li>Service logs: <code>/ekba/dev/service</code></li>
+  <li>Audit log group (baseline): <code>/ekba/dev/audit</code></li>
+  <li>Alarms: <code>ekba-dev-5xx</code> (CodeDeploy auto-rollback), <code>ekba-dev-latency</code></li>
+  <li>Billing alarm <code>ekba-dev-spend</code>: <span class="ni">NOT created in us-west-2</span> (us-east-1 only in Terraform)</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>20. Secrets Manager (names only)</h2>
+<table>
+  <tr><th>Secret name</th><th>Injected as</th></tr>
+  <tr><td><code>ekba/dev/backend/database-url</code></td><td>RDS password → <code>DB_PASSWORD</code></td></tr>
+  <tr><td><code>ekba/dev/backend/qdrant-api-key</code></td><td><code>QDRANT_API_KEY</code></td></tr>
+  <tr><td><code>ekba/dev/backend/dev-auth-secret</code></td><td><code>DEV_AUTH_SECRET</code></td></tr>
+  <tr><td><code>ekba/dev/ai/langsmith-api-key</code></td><td><code>LANGSMITH_API_KEY</code></td></tr>
+  <tr><td><code>ekba/dev/ai/cohere-api-key</code></td><td><code>COHERE_API_KEY</code></td></tr>
+  <tr><td><code>ekba/dev/ai/groq-api-key</code></td><td><code>GROQ_API_KEY</code></td></tr>
+</table>
+<pre class="flow">Secrets Manager → IAM execution role GetSecretValue → ECS task secrets → pydantic Settings → app</pre>
+
+<!-- ============================================================ -->
+<h2>21. API Endpoint Map</h2>
+<p>Global prefix: <code>/api/v1</code> (<code>backend/app/main.py</code>)</p>
+<table>
+  <tr><th>Method</th><th>Endpoint</th><th>Purpose</th><th>Auth</th></tr>
+  <tr><td>GET</td><td>/health</td><td>Liveness</td><td>No</td></tr>
+  <tr><td>GET</td><td>/health/ready</td><td>Postgres+Redis+Qdrant</td><td>No</td></tr>
+  <tr><td>GET</td><td>/me</td><td>Current principal</td><td>Yes</td></tr>
+  <tr><td>POST</td><td>/auth/login</td><td>Sign-in</td><td>No</td></tr>
+  <tr><td>POST</td><td>/auth/new-password</td><td>First login password</td><td>No</td></tr>
+  <tr><td>POST</td><td>/auth/refresh</td><td>Refresh session</td><td>No</td></tr>
+  <tr><td>POST</td><td>/auth/forgot-password</td><td>Reset start (always 202)</td><td>No</td></tr>
+  <tr><td>POST</td><td>/auth/confirm-password-reset</td><td>Reset confirm</td><td>No</td></tr>
+  <tr><td>POST</td><td>/auth/logout</td><td>Sign-out</td><td>Yes</td></tr>
+  <tr><td>POST</td><td>/documents</td><td>Upload</td><td>Yes</td></tr>
+  <tr><td>GET</td><td>/documents</td><td>List</td><td>Yes</td></tr>
+  <tr><td>GET</td><td>/documents/{id}</td><td>Get</td><td>Yes</td></tr>
+  <tr><td>GET</td><td>/documents/{id}/status</td><td>Ingestion status</td><td>Yes</td></tr>
+  <tr><td>GET</td><td>/documents/{id}/download</td><td>Download</td><td>Yes</td></tr>
+  <tr><td>DELETE</td><td>/documents/{id}</td><td>Delete</td><td>Yes</td></tr>
+  <tr><td>POST</td><td>/chat</td><td>RAG Q&amp;A</td><td>Yes</td></tr>
+  <tr><td>POST</td><td>/feedback</td><td>Feedback</td><td>Yes</td></tr>
+  <tr><td>GET</td><td>/agents/workflows</td><td>List workflows</td><td>Yes</td></tr>
+  <tr><td>POST</td><td>/agents/run</td><td>Run agent</td><td>Yes</td></tr>
+  <tr><td>*</td><td>/admin/*</td><td>Company admin console</td><td>admin</td></tr>
+  <tr><td>*</td><td>/platform/*</td><td>Control plane</td><td>platform_admin</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>22. Data Lifecycle</h2>
+<pre class="flow">USER → COGNITO JWT → FastAPI
+  → Postgres (users, documents, jobs, messages, usage, audit)
+  → S3 (original file bytes)
+  → Extract / Chunk → Cohere Embed → Qdrant vectors
+USER question → Embed → Qdrant(+tenant) → Groq → Citations → UI
+  ↘ Redis (rate limit + semantic cache)
+</pre>
+
+<!-- ============================================================ -->
+<h2>23. Destroy → Deploy Lifecycle</h2>
+<p><strong><code>./scripts/destroy.sh</code></strong> (dev only): create manual RDS snapshot → terraform destroy <strong>dev</strong> state.</p>
+<p><strong>Survives:</strong> baseline (Cognito, ECR, S3 bucket, Secrets, budget), cost-guard, frontend (Amplify/CloudFront), state bucket, RDS snapshots, Qdrant Cloud data (external).</p>
+<p><strong><code>./scripts/deploy.sh</code></strong>: recreate ephemeral stack → restore newest RDS snapshot → ECS/CodeDeploy → verify.</p>
+<p><strong><code>./scripts/deploy-frontend.sh</code></strong>: Amplify + CloudFront wiring.</p>
+
+<!-- ============================================================ -->
+<h2>24. Interview Speeches</h2>
+<h3>A) 30 seconds</h3>
+<p>
+  “I built a multi-tenant enterprise RAG assistant: Cognito auth, FastAPI on ECS Fargate,
+  documents in S3, vectors in Qdrant with mandatory tenant filters, embeddings via Cohere,
+  answers via Groq, Postgres for metadata, Redis for cache and rate limits, and blue-green
+  releases with CodeDeploy under a hard AWS cost ceiling.”
+</p>
+<h3>B) 2 minutes</h3>
+<p>
+  Add the onboarding hierarchy (platform → company admin → users), the ingestion pipeline
+  (extract → chunk → embed → upsert), guardrails and citation validation, and the edge path
+  CloudFront → ALB → ECS. Mention hybrid providers are config-driven so RAG code does not
+  hardcode one LLM or embedding vendor.
+</p>
+<h3>C) 5 minutes</h3>
+<p>
+  Walk login JWT claims → upload key design → chunk/embed/upsert → RAG stages including
+  BM25 rerank → blue-green listeners :80/:8080 → destroy/snapshot lifecycle and what is protected.
+</p>
+<h3>D) 10 minutes</h3>
+<p>
+  Deep-dive tenant isolation invariants, <code>RoutingProvider</code>, Secrets Manager injection,
+  OIDC CI vs <code>deploy.sh</code> Terraform path, and honestly call out NOT IMPLEMENTED items
+  (TTS, dedicated OCR, <code>rollback.sh</code> traffic shift).
+</p>
+
+<!-- ============================================================ -->
+<h2>25. Interview Q&amp;A</h2>
+<table>
+  <tr><th>Question</th><th>Strong answer</th></tr>
+  <tr><td>Why Qdrant?</td><td>Payload filters + COSINE + tenant index; filter is built inside <code>vector.search</code> so callers cannot omit it.</td></tr>
+  <tr><td>Why embeddings?</td><td>Semantic retrieval over policies; same model for index and query.</td></tr>
+  <tr><td>Why RAG?</td><td>Ground answers in company docs; citations validated against retrieved chunks.</td></tr>
+  <tr><td>Why Cohere?</td><td>Configured live embed path (<code>embed-multilingual-v3.0</code>, 1024-d); Titan remains a config alternative.</td></tr>
+  <tr><td>Why PostgreSQL?</td><td>Relational tenancy, jobs, audit, usage — durable across task replacement via RDS snapshots.</td></tr>
+  <tr><td>Why S3?</td><td>Durable originals with tenant-prefixed keys generated server-side.</td></tr>
+  <tr><td>Why Cognito?</td><td>Managed IdP; app never stores or sets passwords.</td></tr>
+  <tr><td>Why Redis?</td><td>Ephemeral rate limiting + semantic cache; cheap sidecar, no ElastiCache cost.</td></tr>
+  <tr><td>Why ALB / ECS / CodeDeploy?</td><td>Fargate + blue-green with a dedicated test listener before traffic shift.</td></tr>
+  <tr><td>Why CloudFront / Amplify?</td><td>HTTPS UI/API for users while ALB stays HTTP-only.</td></tr>
+  <tr><td>Tenant isolation?</td><td>JWT tenant only → SQL filters, S3 prefix checks, mandatory Qdrant tenant filter.</td></tr>
+  <tr><td>ECS crash?</td><td>Target health fails; traffic stops; new task; 5xx alarm can auto-rollback deploy.</td></tr>
+  <tr><td>Manual rollback script?</td><td><code>rollback.sh</code> traffic shift is not implemented yet; CodeDeploy auto-rollback is.</td></tr>
+  <tr><td>Where are secrets?</td><td>AWS Secrets Manager under <code>ekba/dev/...</code> — never in git or frontend.</td></tr>
+  <tr><td>Cost control?</td><td>No NAT/EKS/ElastiCache; destroy after demo; gross spend guard near $18.</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>26. Final Master Flow</h2>
+<pre class="flow">RUNTIME
+  User → Amplify → CloudFront → ALB → ECS FastAPI
+       → Cognito verify → Postgres / S3 / Qdrant / Redis
+       → Cohere (embed) → Groq (chat) → Answer + citations
+
+DEPLOY
+  GitHub → Actions (OIDC) → ECR → CodeDeploy blue/green → ALB traffic shift
+</pre>
+
+<!-- ============================================================ -->
+<h2>27. File / Code References</h2>
+<table>
+  <tr><th>Topic</th><th>Path</th></tr>
+  <tr><td>App entry / routes</td><td><code>backend/app/main.py</code></td></tr>
+  <tr><td>Config / providers</td><td><code>backend/app/core/config.py</code></td></tr>
+  <tr><td>JWT / RBAC</td><td><code>backend/app/core/auth.py</code>, <code>api/deps.py</code></td></tr>
+  <tr><td>Auth / platform / admin APIs</td><td><code>api/v1/auth.py</code>, <code>platform.py</code>, <code>admin.py</code></td></tr>
+  <tr><td>Documents / chat</td><td><code>api/v1/documents.py</code>, <code>chat.py</code></td></tr>
+  <tr><td>RAG</td><td><code>services/rag/pipeline.py</code>, <code>guardrails.py</code>, <code>cache.py</code>, <code>rerank.py</code>, <code>prompts.py</code></td></tr>
+  <tr><td>Ingestion</td><td><code>services/ingestion/pipeline.py</code>, <code>extractors.py</code>, <code>chunker.py</code></td></tr>
+  <tr><td>AI backends</td><td><code>services/ai/provider.py</code>, <code>registry.py</code>, <code>transcribe.py</code></td></tr>
+  <tr><td>Qdrant / S3</td><td><code>services/vector.py</code>, <code>services/storage.py</code>, <code>security/files.py</code></td></tr>
+  <tr><td>Models</td><td><code>db/models.py</code></td></tr>
+  <tr><td>AWS AI env</td><td><code>infra/terraform/envs/dev/main.tf</code></td></tr>
+  <tr><td>Blue-green</td><td><code>infra/terraform/modules/service/main.tf</code></td></tr>
+  <tr><td>Baseline secrets</td><td><code>infra/terraform/envs/baseline/main.tf</code></td></tr>
+  <tr><td>CI/CD</td><td><code>.github/workflows/ci.yml</code>, <code>deploy.yml</code></td></tr>
+  <tr><td>Lifecycle</td><td><code>scripts/deploy.sh</code>, <code>destroy.sh</code>, <code>deploy-frontend.sh</code>, <code>rollback.sh</code></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>28. NOT IMPLEMENTED (say this honestly in interviews)</h2>
+<ul class="compact">
+  <li>TTS (text-to-speech)</li>
+  <li>Dedicated OCR service (Textract / Tesseract) — PDF is pypdf text extraction</li>
+  <li><code>scripts/rollback.sh</code> CodeDeploy traffic shift (placeholder)</li>
+  <li>ElastiCache, NAT Gateway, EKS, EFS</li>
+  <li>Automatic embedding-model failover (config switch only)</li>
+  <li>Automatic Groq→Bedrock failover on quota errors (switch via <code>LLM_PROVIDER</code>)</li>
+</ul>
+
+<div class="footer">
+  Generated from a read-only inspection of the EKBA repository.
+  Do not paste API keys, passwords, or token values into this document or into chat logs.
+</div>
+
+</body>
+</html>
