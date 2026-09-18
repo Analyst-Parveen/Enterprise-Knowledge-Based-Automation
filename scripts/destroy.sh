@@ -62,13 +62,24 @@ printf '%s\n' "$STATE_RESOURCES" | sed 's/^/    /'
 # Guard 3: produce a DESTROY PLAN and show exactly what would be destroyed
 # ---------------------------------------------------------------------------
 # backend_image is required and has no default: deploy.sh passes the image it
-# built. A destroy plan still needs a value, so read the real one from the task
-# definition revision this state tracks (the same api-container lookup
-# deploy-frontend.sh uses). BACKEND_IMAGE=<ECR image URI> overrides it, e.g.
-# when an interrupted destroy already removed the task definition.
-step "Resolving backend_image from the task definition in this state"
+# built. A destroy plan still needs a value for it, and that value never creates
+# anything - Terraform destroys what the state records, whatever this resolves to.
+#
+# A partial destroy removes the task definition before the resources that failed,
+# so a resumed run must not be blocked by a dependency that is already gone.
+# Resolution order:
+#   1. BACKEND_IMAGE                        explicit override
+#   2. the task definition in this state    the normal case
+#   3. newest TAGGED image in this project's own ECR repository   fallback
+# Never invented and never a bare ":latest": step 3 fails loudly if the
+# repository holds no tagged image.
+step "Resolving backend_image for the destroy plan"
+ECR_REPO="${PROJECT_CODE}-${ENVIRONMENT}-backend"
 BACKEND_IMAGE="${BACKEND_IMAGE:-}"
+BACKEND_IMAGE_SOURCE="BACKEND_IMAGE override"
+
 if [ -z "$BACKEND_IMAGE" ]; then
+  BACKEND_IMAGE_SOURCE="task definition in Terraform state"
   TASK_DEF_ARN="$(terraform -chdir="$TF_DIR" state show -no-color 'module.service.aws_ecs_task_definition.app' 2>/dev/null \
     | sed -nE 's/^[[:space:]]*arn[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' | head -1 || true)"
   if [ -n "$TASK_DEF_ARN" ]; then
@@ -76,11 +87,34 @@ if [ -z "$BACKEND_IMAGE" ]; then
       --query "taskDefinition.containerDefinitions[?name=='api'] | [0].image" --output text 2>/dev/null | tr -d '\r' || true)"
   fi
 fi
+
 case "$BACKEND_IMAGE" in
   ""|None)
-    die "could not read backend_image from the task definition in this state. NOTHING was destroyed. Rerun with BACKEND_IMAGE=<ECR image URI>." ;;
+    log "no task definition to read (already destroyed?) - falling back to the ECR repository"
+    BACKEND_IMAGE_SOURCE="newest tagged image in ECR ${ECR_REPO}"
+
+    # The repository is this project's own (name-owned ekba-<env>-backend) and
+    # lives in the protected baseline, so reading it is safe at any stage of a
+    # teardown. describe-repositories gives the authoritative URI rather than a
+    # hand-built one.
+    ECR_URI="$(aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" \
+      --query 'repositories[0].repositoryUri' --output text 2>/dev/null | tr -d '\r' || true)"
+
+    # Newest image that actually carries a tag. Tags are sorted so an image with
+    # several of them always resolves to the same one, and "latest" is excluded
+    # so the plan always names a concrete build.
+    ECR_TAG="$(aws ecr describe-images --repository-name "$ECR_REPO" --region "$AWS_REGION" \
+      --query 'reverse(sort_by(imageDetails[?imageTags], &imagePushedAt))[0].imageTags' \
+      --output text 2>/dev/null | tr '\t' '\n' | tr -d '\r' | grep -v '^latest$' | sort | head -1 || true)"
+
+    if [ -z "$ECR_URI" ] || [ "$ECR_URI" = "None" ] || [ -z "$ECR_TAG" ] || [ "$ECR_TAG" = "None" ]; then
+      die "backend_image could not be resolved: no task definition in this state, and no tagged image in ECR ${ECR_REPO}. NOTHING was destroyed. Rerun with BACKEND_IMAGE=<ECR image URI>."
+    fi
+    BACKEND_IMAGE="${ECR_URI}:${ECR_TAG}"
+    ;;
 esac
 ok "backend_image: ${BACKEND_IMAGE}"
+log "resolved from: ${BACKEND_IMAGE_SOURCE}"
 
 step "Generating destroy plan"
 terraform -chdir="$TF_DIR" plan -destroy -input=false -out=tfdestroyplan \
