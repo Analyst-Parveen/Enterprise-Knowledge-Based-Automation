@@ -35,6 +35,7 @@ from app.core.logging import get_logger
 from app.db import repositories as repo
 from app.services import vector
 from app.services.ai.provider import get_provider
+from app.services.llm_quota import gated_chat
 from app.services.rag import cache, guardrails, prompts
 from app.services.rag.rerank import rerank
 from app.services.security.injection import scan_input, validate_question
@@ -202,7 +203,9 @@ async def answer_question(
     context = prompts.build_context(hits, max_chars=max_context_chars)
 
     # -- 9. model routing (inside the provider: primary -> fallback) -----
-    chat_result = await provider.chat(
+    chat_result = await gated_chat(
+        ctx,
+        provider=provider,
         system=prompts.SYSTEM_PROMPT,
         messages=[prompts.build_user_message(context, question)],
         max_tokens=settings.max_output_tokens,

@@ -102,9 +102,23 @@ ActiveTenantUser = Annotated[RequestContext, Depends(active_tenant_context)]
 # ---------------------------------------------------------------------------
 # rate limiting
 # ---------------------------------------------------------------------------
+async def _apply_plan_caps(ctx: RequestContext, session: DbSession, bucket: str, key: str) -> None:
+    if ctx.is_platform_admin:
+        return
+    from app.services.billing import entitlement_limit
+
+    limit = await entitlement_limit(session, ctx, key)
+    if limit is not None:
+        await ratelimit.enforce_tenant(ctx, bucket, limit)
+
+
 async def rate_limit_api(ctx: CurrentUser, session: DbSession) -> RequestContext:
     await ratelimit.enforce(ctx, "api")
     await _require_active_tenant(ctx, session)
+    from app.services.billing import require_active_subscription
+
+    await require_active_subscription(session, ctx)
+    await _apply_plan_caps(ctx, session, "api", "tenant_api_per_min")
     return ctx
 
 
@@ -113,12 +127,20 @@ async def rate_limit_upload(ctx: CurrentUser, session: DbSession) -> RequestCont
     await ratelimit.enforce(ctx, "api")
     await ratelimit.enforce(ctx, "upload")
     await _require_active_tenant(ctx, session)
+    from app.services.billing import require_active_subscription
+
+    await require_active_subscription(session, ctx)
+    await _apply_plan_caps(ctx, session, "upload", "tenant_upload_per_min")
     return ctx
 
 
 async def rate_limit_server(ctx: CurrentUser, session: DbSession) -> RequestContext:
     await ratelimit.enforce(ctx, "server")
     await _require_active_tenant(ctx, session)
+    from app.services.billing import require_active_subscription
+
+    await require_active_subscription(session, ctx)
+    await _apply_plan_caps(ctx, session, "server", "tenant_api_per_min")
     return ctx
 
 

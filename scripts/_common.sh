@@ -191,9 +191,9 @@ report_header() {
 #
 # Note: ce:GetCostAndUsage costs $0.01 per request. Called once per deploy.
 # ---------------------------------------------------------------------------
-MAX_MONTHLY_SPEND_USD="${MAX_MONTHLY_SPEND_USD:-20}"
+MAX_MONTHLY_SPEND_USD="${MAX_MONTHLY_SPEND_USD:-30}"
 COST_GUARD_START="${COST_GUARD_START:-2026-09-01}"
-COST_GUARD_SHUTDOWN_USD="${COST_GUARD_SHUTDOWN_USD:-18}"
+COST_GUARD_SHUTDOWN_USD="${COST_GUARD_SHUTDOWN_USD:-28}"
 
 # ce_total FILTER_JSON - sum of UnblendedCost from COST_GUARD_START to today.
 ce_total() {

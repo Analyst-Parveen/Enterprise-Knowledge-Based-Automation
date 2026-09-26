@@ -16,7 +16,8 @@ import {
   Select,
   Textarea,
 } from "@/components/ui";
-import { api } from "@/lib/api";
+import { QuotaMeter, QuotaUpgrade, type TokenQuota } from "@/components/quota";
+import { api, ApiClientError } from "@/lib/api";
 import { DEPARTMENTS, type ChatResponse, type Department } from "@/types/api";
 
 interface Turn {
@@ -30,7 +31,13 @@ export default function ChatPage() {
   const [turns, setTurns] = React.useState<Turn[]>([]);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [quotaBlocked, setQuotaBlocked] = React.useState(false);
+  const [quota, setQuota] = React.useState<TokenQuota | null>(null);
   const [conversationId, setConversationId] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    void api.billing.usage().then(setQuota).catch(() => undefined);
+  }, []);
 
   async function ask(event?: React.FormEvent) {
     event?.preventDefault();
@@ -39,6 +46,7 @@ export default function ChatPage() {
 
     setBusy(true);
     setError(null);
+    setQuotaBlocked(false);
     try {
       const response = await api.chat({
         question: asked,
@@ -48,8 +56,14 @@ export default function ChatPage() {
       setTurns((prev) => [...prev, { question: asked, response }]);
       setConversationId(response.conversation_id);
       setQuestion("");
+      void api.billing.usage().then(setQuota).catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "The request failed.");
+      if (err instanceof ApiClientError && err.code === "token_quota_exceeded") {
+        setQuotaBlocked(true);
+        if (err.quota) setQuota(err.quota);
+      } else {
+        setError(err instanceof Error ? err.message : "The request failed.");
+      }
     } finally {
       setBusy(false);
     }
@@ -83,6 +97,7 @@ export default function ChatPage() {
                 <p className="whitespace-pre-wrap text-sm leading-relaxed text-fg">
                   {turn.response.answer}
                 </p>
+                <SpeakControls text={turn.response.answer} />
 
                 {turn.response.citations.length > 0 ? (
                   <div>
@@ -137,7 +152,13 @@ export default function ChatPage() {
             </Card>
           ) : null}
 
-          {error ? <ErrorState message={error} onRetry={() => setError(null)} /> : null}
+          {quotaBlocked ? (
+            <QuotaUpgrade quota={quota} />
+          ) : error ? (
+            <ErrorState message={error} onRetry={() => setError(null)} />
+          ) : (
+            <QuotaMeter quota={quota} />
+          )}
 
           <Card>
             <CardBody>
@@ -154,6 +175,9 @@ export default function ChatPage() {
                   disabled={busy}
                 />
                 <div className="flex flex-wrap items-center gap-2">
+                  <Select aria-label="Model" className="w-auto" value="groq" disabled>
+                    <option value="groq">Groq · openai/gpt-oss-20b</option>
+                  </Select>
                   <Select
                     aria-label="Department filter"
                     className="w-auto"
@@ -215,6 +239,39 @@ export default function ChatPage() {
  * Transcribe through the normal ingestion pipeline - there is no separate AI
  * backend for voice. See PROJECT.md section 13.
  */
+function SpeakControls({ text }: { text: string }) {
+  const [speaking, setSpeaking] = React.useState(false);
+  const [muted, setMuted] = React.useState(false);
+
+  function stop() {
+    window.speechSynthesis?.cancel();
+    setSpeaking(false);
+  }
+
+  function play() {
+    if (muted || typeof window === "undefined" || !window.speechSynthesis) return;
+    stop();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.onend = () => setSpeaking(false);
+    setSpeaking(true);
+    window.speechSynthesis.speak(utterance);
+  }
+
+  return (
+    <div className="flex gap-2">
+      <Button type="button" variant="secondary" onClick={play} disabled={muted || speaking}>
+        Play
+      </Button>
+      <Button type="button" variant="secondary" onClick={stop} disabled={!speaking}>
+        Stop
+      </Button>
+      <Button type="button" variant="secondary" onClick={() => { stop(); setMuted((m) => !m); }}>
+        {muted ? "Unmute" : "Mute"}
+      </Button>
+    </div>
+  );
+}
+
 function VoiceInput({ onTranscript }: { onTranscript: (text: string) => void }) {
   const [listening, setListening] = React.useState(false);
   const [supported, setSupported] = React.useState(false);

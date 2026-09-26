@@ -64,6 +64,9 @@ async def create_tenant(
     )
     session.add(tenant)
     await session.flush()
+    from app.services.billing import grant_complimentary
+
+    await grant_complimentary(session, tenant.id)
     return tenant
 
 

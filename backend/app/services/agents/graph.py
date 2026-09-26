@@ -18,6 +18,7 @@ from typing import Any
 from langgraph.graph import END, StateGraph
 
 from app.core.context import RequestContext, get_correlation_id
+from app.core.exceptions import TokenQuotaError
 from app.core.logging import get_logger
 from app.services.agents import nodes
 from app.services.agents.state import AgentState, WorkflowType
@@ -126,6 +127,8 @@ async def run_workflow(
             get_graph().ainvoke(initial, config={"recursion_limit": nodes.MAX_STEPS}),
             timeout=WORKFLOW_TIMEOUT_SECONDS,
         )
+    except TokenQuotaError:
+        raise
     except TimeoutError:
         logger.error(
             "agent_workflow_timeout",

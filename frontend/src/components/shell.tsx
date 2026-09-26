@@ -6,6 +6,7 @@ import {
   Bot,
   Building2,
   ClipboardList,
+  CreditCard,
   Eye,
   EyeOff,
   FileText,
@@ -48,6 +49,7 @@ const USER_NAV: NavItem[] = [
   { href: "/documents", label: "Documents", icon: FileText },
   { href: "/departments", label: "Departments", icon: Building2 },
   { href: "/usage", label: "Usage", icon: BarChart3 },
+  { href: "/billing", label: "Billing", icon: CreditCard },
   { href: "/feedback", label: "Feedback", icon: MessagesSquare },
 ];
 

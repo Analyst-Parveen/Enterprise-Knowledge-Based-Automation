@@ -1,4 +1,4 @@
-"""SQLAlchemy models - the 10 entities from PROJECT.md section 14.
+"""SQLAlchemy models.
 
 Every table holding tenant data has a non-nullable, indexed tenant_id.
 See .claude/rules/tenant-isolation.md section 3.
@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -314,3 +316,178 @@ class AuditEvent(Base, TimestampMixin):
     reason: Mapped[str | None] = mapped_column(String(200))
     details: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     ip_address: Mapped[str | None] = mapped_column(String(64))
+
+
+# ---------------------------------------------------------------------------
+# billing — subscription belongs to the tenant, not a user
+# ---------------------------------------------------------------------------
+class BillingInterval(str, enum.Enum):
+    MONTHLY = "monthly"
+    YEARLY = "yearly"
+
+
+class SubscriptionStatus(str, enum.Enum):
+    ACTIVE = "active"
+    PAST_DUE = "past_due"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    HALTED = "halted"
+    INCOMPLETE = "incomplete"
+
+
+class SubscriptionPlan(Base, TimestampMixin):
+    __tablename__ = "subscription_plans"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    code: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    interval: Mapped[BillingInterval] = mapped_column(
+        Enum(BillingInterval, name="billing_interval"), nullable=False
+    )
+    currency: Mapped[str] = mapped_column(String(3), default="INR", nullable=False)
+    base_amount_paise: Mapped[int] = mapped_column(Integer, nullable=False)
+    razorpay_plan_id: Mapped[str | None] = mapped_column(String(64))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    entitlements: Mapped[list[PlanEntitlement]] = relationship(back_populates="plan")
+
+
+class PlanEntitlement(Base, TimestampMixin):
+    __tablename__ = "plan_entitlements"
+    __table_args__ = (UniqueConstraint("plan_id", "entitlement_key", name="uq_plan_entitlement"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    plan_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("subscription_plans.id", ondelete="CASCADE"), nullable=False
+    )
+    entitlement_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    entitlement_value: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    plan: Mapped[SubscriptionPlan] = relationship(back_populates="entitlements")
+
+
+class TenantSubscription(Base, TimestampMixin):
+    __tablename__ = "tenant_subscriptions"
+    __table_args__ = (UniqueConstraint("tenant_id", name="uq_tenant_subscription"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    plan_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("subscription_plans.id"), nullable=False
+    )
+    status: Mapped[SubscriptionStatus] = mapped_column(
+        Enum(SubscriptionStatus, name="subscription_status"),
+        default=SubscriptionStatus.INCOMPLETE,
+        nullable=False,
+    )
+    complimentary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    razorpay_subscription_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    plan: Mapped[SubscriptionPlan] = relationship()
+
+
+class TenantBillingProfile(Base, TimestampMixin):
+    __tablename__ = "tenant_billing_profiles"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    legal_name: Mapped[str | None] = mapped_column(String(200))
+    gstin: Mapped[str | None] = mapped_column(String(15))
+    state: Mapped[str | None] = mapped_column(String(80))
+
+
+class PaymentTransaction(Base, TimestampMixin):
+    __tablename__ = "payment_transactions"
+    __table_args__ = (Index("ix_payments_tenant_created", "tenant_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    subscription_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("tenant_subscriptions.id", ondelete="SET NULL")
+    )
+    razorpay_payment_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    base_paise: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    gst_paise: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    gateway_fee_paise: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_paise: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    method: Mapped[str | None] = mapped_column(String(40))
+
+
+class BillingWebhookEvent(Base, TimestampMixin):
+    __tablename__ = "billing_webhook_events"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    razorpay_event_id: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class FeeRule(Base, TimestampMixin):
+    __tablename__ = "fee_rules"
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value_int: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class LlmUsagePeriod(Base, TimestampMixin):
+    """One locked row per tenant per calendar month. Holds the quota balance."""
+
+    __tablename__ = "llm_usage_periods"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "period_start", name="uq_llm_period_tenant"),
+        Index("ix_llm_period_tenant", "tenant_id", "period_start"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    request_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reserved_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class LlmUsageLedger(Base, TimestampMixin):
+    """One row per LLM call. user_id is the token subject, same as request_usage."""
+
+    __tablename__ = "llm_usage_ledger"
+    __table_args__ = (
+        Index("ix_llm_ledger_tenant_period", "tenant_id", "period_start"),
+        Index("ix_llm_ledger_user", "user_id"),
+        Index("ix_llm_ledger_correlation", "correlation_id"),
+        CheckConstraint(
+            "status IN ('reserved', 'reconciled', 'released')",
+            name="ck_llm_ledger_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    period_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("llm_usage_periods.id", ondelete="CASCADE"), nullable=False
+    )
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    correlation_id: Mapped[str | None] = mapped_column(String(64))
+    model: Mapped[str | None] = mapped_column(String(200))
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    request_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reserved_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)

@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     groq_api_key: SecretStr | None = None
     groq_api_base: str = "https://api.groq.com/openai/v1"
 
+    # Razorpay test/live keys. Empty means checkout is unavailable; chat still works.
+    razorpay_key_id: str = ""
+    razorpay_key_secret: SecretStr | None = None
+    razorpay_webhook_secret: SecretStr | None = None
+
     # -- RAG / guardrail tuning ------------------------------------------
     retrieval_top_k: int = 8
     relevance_threshold: float = 0.35

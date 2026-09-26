@@ -18,7 +18,8 @@ import {
   Textarea,
 } from "@/components/ui";
 import { useAsync } from "@/hooks/useAsync";
-import { api } from "@/lib/api";
+import { QuotaMeter, QuotaUpgrade, type TokenQuota } from "@/components/quota";
+import { api, ApiClientError } from "@/lib/api";
 import { DEPARTMENTS, type AgentResponse, type Department, type WorkflowId } from "@/types/api";
 
 export default function AgentsPage() {
@@ -31,11 +32,18 @@ export default function AgentsPage() {
   const [result, setResult] = React.useState<AgentResponse | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [quotaBlocked, setQuotaBlocked] = React.useState(false);
+  const [quota, setQuota] = React.useState<TokenQuota | null>(null);
+
+  React.useEffect(() => {
+    void api.billing.usage().then(setQuota).catch(() => undefined);
+  }, []);
 
   async function run(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
+    setQuotaBlocked(false);
     setResult(null);
     try {
       setResult(
@@ -45,8 +53,14 @@ export default function AgentsPage() {
           department: department || null,
         }),
       );
+      void api.billing.usage().then(setQuota).catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "The workflow failed.");
+      if (err instanceof ApiClientError && err.code === "token_quota_exceeded") {
+        setQuotaBlocked(true);
+        if (err.quota) setQuota(err.quota);
+      } else {
+        setError(err instanceof Error ? err.message : "The workflow failed.");
+      }
     } finally {
       setBusy(false);
     }
@@ -127,7 +141,14 @@ export default function AgentsPage() {
         </Card>
 
         <div className="space-y-4 lg:col-span-2">
-          {error ? <ErrorState message={error} onRetry={() => setError(null)} /> : null}
+          {quotaBlocked ? (
+            <QuotaUpgrade quota={quota} />
+          ) : (
+            <>
+              {error ? <ErrorState message={error} onRetry={() => setError(null)} /> : null}
+              <QuotaMeter quota={quota} />
+            </>
+          )}
 
           {busy ? (
             <Card>

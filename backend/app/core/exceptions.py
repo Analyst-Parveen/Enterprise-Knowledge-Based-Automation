@@ -59,6 +59,14 @@ class CompanySuspendedError(AuthorizationError):
     message = "Your company's workspace is suspended. Contact your service provider."
 
 
+class SubscriptionRequiredError(AuthorizationError):
+    """The tenant has no active subscription. Billing routes stay open."""
+
+    status_code = 402
+    code = "subscription_required"
+    message = "This company does not have an active subscription."
+
+
 class NotFoundError(AppError):
     status_code = 404
     code = "not_found"
@@ -93,6 +101,19 @@ class RateLimitError(AppError):
         super().__init__(**details)
 
 
+class TokenQuotaError(RateLimitError):
+    """The tenant's monthly LLM token allowance is exhausted."""
+
+    code = "token_quota_exceeded"
+    message = (
+        "Your monthly AI usage limit has been reached. "
+        "Please upgrade your plan to continue using AI services."
+    )
+
+    def __init__(self, *, used: int, limit: int, remaining: int) -> None:
+        super().__init__(retry_after=3600, used=used, limit=limit, remaining=remaining)
+
+
 class GuardrailError(AppError):
     """Input or output blocked by a guardrail stage."""
 
@@ -113,11 +134,17 @@ async def app_error_handler(request: Request, exc: Exception) -> JSONResponse:
     if isinstance(exc, RateLimitError):
         headers["Retry-After"] = str(exc.retry_after)
 
+    error: dict[str, Any] = {"code": exc.code, "message": exc.message}
+    if isinstance(exc, TokenQuotaError):
+        error["used"] = int(exc.details["used"])
+        error["limit"] = int(exc.details["limit"])
+        error["remaining"] = int(exc.details["remaining"])
+
     return JSONResponse(
         status_code=exc.status_code,
         headers=headers,
         content={
-            "error": {"code": exc.code, "message": exc.message},
+            "error": error,
             "correlation_id": get_correlation_id(),
         },
     )

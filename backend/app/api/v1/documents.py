@@ -6,7 +6,8 @@ import asyncio
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, Query, UploadFile
 
-from app.api.deps import ActiveTenantUser, DbSession, RateLimitedUser, UploadUser
+from app.api.deps import DbSession, RateLimitedUser, UploadUser
+from app.core import ratelimit
 from app.core.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
@@ -29,6 +30,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 _UPLOAD_READ_CHUNK = 1024 * 1024  # 1 MB
+_INGEST_SLOTS = asyncio.Semaphore(2)
 
 
 @router.post("", response_model=UploadResponse, status_code=201)
@@ -109,6 +111,14 @@ async def upload_document(
     await session.commit()
     await session.refresh(document)
 
+    from app.services.billing import entitlement_limit
+
+    job_limit = await entitlement_limit(session, ctx, "max_concurrent_jobs") or 2
+    if not await ratelimit.acquire_job_slot(ctx.tenant_id, job_limit):
+        from app.core.exceptions import RateLimitError
+
+        raise RateLimitError(retry_after=30)
+
     # Ingestion runs outside the request. Never parse documents in a handler.
     background.add_task(_run_ingestion_task, ctx, document.id, job.id)
 
@@ -120,15 +130,18 @@ async def _run_ingestion_task(ctx, document_id: str, job_id: str) -> None:  # ty
     from app.core.context import set_request_context
 
     set_request_context(ctx)
-    async with get_sessionmaker()() as session:
-        try:
-            await ingest_document(session, ctx, document_id, job_id)
-            await cache.invalidate_tenant(ctx)
-        except Exception:  # noqa: BLE001 - never let a task die silently
-            logger.exception(
-                "ingestion_task_crashed",
-                extra={"extra": {"document_id": document_id, "job_id": job_id}},
-            )
+    async with _INGEST_SLOTS:
+        async with get_sessionmaker()() as session:
+            try:
+                await ingest_document(session, ctx, document_id, job_id)
+                await cache.invalidate_tenant(ctx)
+            except Exception:  # noqa: BLE001 - never let a task die silently
+                logger.exception(
+                    "ingestion_task_crashed",
+                    extra={"extra": {"document_id": document_id, "job_id": job_id}},
+                )
+            finally:
+                await ratelimit.release_job_slot(ctx.tenant_id)
 
 
 @router.get("", response_model=DocumentListResponse)
@@ -186,7 +199,7 @@ async def download_document(
 
 @router.delete("/{document_id}", response_model=DeleteResponse)
 async def delete_document(
-    ctx: ActiveTenantUser, session: DbSession, document_id: str
+    ctx: RateLimitedUser, session: DbSession, document_id: str
 ) -> DeleteResponse:
     """Deletion requires ownership or admin in the same tenant. Always audited.
 

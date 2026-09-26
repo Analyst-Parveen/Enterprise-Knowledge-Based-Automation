@@ -281,6 +281,10 @@ locals {
     "ai/langsmith-api-key",
     "ai/cohere-api-key",
     "ai/groq-api-key",
+    # Razorpay lives in one secret, ekba/<env>/razorpay, holding the key id, key
+    # secret and webhook secret as JSON keys. It is created out of band and is
+    # deliberately not declared here, so applying this stack cannot create a
+    # second, empty copy of it.
   ]
 }
 

@@ -49,6 +49,7 @@ export class ApiClientError extends Error {
     readonly code: string,
     message: string,
     readonly correlationId: string,
+    readonly quota?: { used: number; limit: number; remaining: number },
   ) {
     super(message);
     this.name = "ApiClientError";
@@ -203,11 +204,19 @@ async function rawRequest<T>(
       code === "company_suspended"
         ? COMPANY_SUSPENDED_MESSAGE
         : (payload?.error?.message ?? `Request failed (${response.status})`);
+    const used = payload?.error?.used;
+    const limit = payload?.error?.limit;
+    const remaining = payload?.error?.remaining;
+    const quota =
+      typeof used === "number" && typeof limit === "number" && typeof remaining === "number"
+        ? { used, limit, remaining }
+        : undefined;
     throw new ApiClientError(
       response.status,
       code,
       message,
       payload?.correlation_id ?? correlationId,
+      quota,
     );
   }
 
@@ -324,6 +333,74 @@ export const api = {
 
     audit: (limit = 200) =>
       request<AuditEvent[]>(`/api/v1/platform/audit?limit=${limit}`),
+  },
+
+  billing: {
+    plans: () =>
+      request<
+        {
+          id: string;
+          code: string;
+          name: string;
+          interval: string;
+          currency: string;
+          base_amount_paise: number;
+          entitlements: Record<string, number>;
+        }[]
+      >("/api/v1/billing/plans"),
+    subscription: () =>
+      request<{
+        status: string;
+        plan_id: string | null;
+        complimentary: boolean;
+        current_period_end: string | null;
+        payments_configured: boolean;
+      }>("/api/v1/billing/subscription"),
+    quote: (plan_id: string) =>
+      request<{
+        plan_id: string;
+        currency: string;
+        base_paise: number;
+        gst_paise: number;
+        gateway_fee_paise: number;
+        gateway_fee_charged_paise: number;
+        total_paise: number;
+        customer_pays_gateway_fee: boolean;
+      }>("/api/v1/billing/quote", {
+        method: "POST",
+        body: JSON.stringify({ plan_id }),
+      }),
+    checkout: (plan_id: string) =>
+      request<{
+        key_id: string;
+        subscription_id: string;
+        quote: {
+          plan_id: string;
+          currency: string;
+          base_paise: number;
+          gst_paise: number;
+          gateway_fee_paise: number;
+          gateway_fee_charged_paise: number;
+          total_paise: number;
+          customer_pays_gateway_fee: boolean;
+        };
+      }>("/api/v1/billing/checkout", {
+        method: "POST",
+        body: JSON.stringify({ plan_id }),
+      }),
+    payments: () =>
+      request<{ id: string; status: string; total_paise: number; method: string | null; created_at: string }[]>(
+        "/api/v1/billing/payments",
+      ),
+    cancel: () => request<{ status: string }>("/api/v1/billing/cancel", { method: "POST" }),
+    usage: () =>
+      request<{
+        used: number;
+        limit: number | null;
+        remaining: number | null;
+        period_start: string;
+        period_end: string;
+      }>("/api/v1/billing/usage"),
   },
 
   documents: {

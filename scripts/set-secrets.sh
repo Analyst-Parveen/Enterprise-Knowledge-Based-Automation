@@ -65,6 +65,11 @@ set_if_empty "ai/langsmith-api-key"     "not-configured"
 # Placeholders only - real Cohere/Groq values are set out-of-band for live demos.
 set_if_empty "ai/cohere-api-key"        "not-configured"
 set_if_empty "ai/groq-api-key"          "not-configured"
+# Razorpay is NOT handled here. Its three values live in one secret,
+# ${PREFIX}/razorpay, as the JSON keys RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET and
+# RAZORPAY_WEBHOOK_SECRET. That secret is created out of band with the real
+# test-mode credentials; generating a placeholder for it would only mask a
+# missing key at task start.
 
 REPORT="$(report_path set-secrets)"
 report_header "$REPORT" "Secrets Setup"

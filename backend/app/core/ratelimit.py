@@ -79,6 +79,59 @@ async def enforce(ctx: RequestContext, bucket: Bucket = "api") -> None:
     await _consume(f"{settings.project_code}:rl:{bucket}:{ctx.tenant_id}:{ctx.user_id}", bucket)
 
 
+async def enforce_tenant(ctx: RequestContext, bucket: str, limit: int) -> None:
+    """Plan cap shared by every user in the tenant. Extends, does not replace, per-user limits."""
+    if limit <= 0:
+        return
+    key = f"{settings.project_code}:rl:tenant:{bucket}:{ctx.tenant_id}"
+    client = get_redis()
+    pipe = client.pipeline()
+    pipe.incr(key)
+    pipe.ttl(key)
+    count, ttl = await pipe.execute()
+    if int(count) == 1:
+        await client.expire(key, 60)
+        ttl = 60
+    if int(count) > limit:
+        retry_after = int(ttl) if int(ttl) > 0 else 60
+        log_security_event(
+            "ratelimit.tenant_exceeded",
+            reason=f"bucket_{bucket}_limit_{limit}",
+            bucket=bucket,
+            limit=limit,
+        )
+        raise RateLimitError(retry_after=retry_after)
+
+
+async def acquire_job_slot(tenant_id: str, limit: int) -> bool:
+    """Bound in-flight ingestion per tenant.
+
+    Redis errors fail open. The process semaphore still applies.
+    """
+    if limit <= 0:
+        return True
+    key = f"{settings.project_code}:jobs:{tenant_id}"
+    try:
+        client = get_redis()
+        count = int(await client.incr(key))
+        if count == 1:
+            await client.expire(key, 3600)
+        if count > limit:
+            await client.decr(key)
+            return False
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
+async def release_job_slot(tenant_id: str) -> None:
+    key = f"{settings.project_code}:jobs:{tenant_id}"
+    try:
+        await get_redis().decr(key)
+    except Exception:  # noqa: BLE001
+        return
+
+
 async def enforce_anonymous(identifier: str, bucket: Bucket = "auth") -> None:
     """Rate limit for endpoints reached before any principal exists.
 

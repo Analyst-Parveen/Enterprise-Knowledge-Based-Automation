@@ -15,6 +15,7 @@ from app.core.logging import get_logger
 from app.services import vector
 from app.services.agents.state import AgentState, WorkflowType
 from app.services.ai.provider import get_provider
+from app.services.llm_quota import gated_chat
 from app.services.rag import guardrails, prompts
 from app.services.rag.rerank import rerank
 from app.services.vector import SearchHit
@@ -155,7 +156,9 @@ async def analyze_node(state: AgentState) -> dict[str, Any]:
         workflow, _ANALYSIS_INSTRUCTIONS[WorkflowType.SUMMARIZATION.value]
     )
 
-    result = await get_provider().chat(
+    result = await gated_chat(
+        ctx_from_state(state),
+        provider=get_provider(),
         system=prompts.SYSTEM_PROMPT,
         messages=[
             {
@@ -239,7 +242,9 @@ async def synthesize_node(state: AgentState) -> dict[str, Any]:
         workflow, _SYNTHESIS_INSTRUCTIONS[WorkflowType.SUMMARIZATION.value]
     )
 
-    result = await get_provider().chat(
+    result = await gated_chat(
+        ctx_from_state(state),
+        provider=get_provider(),
         system=prompts.SYSTEM_PROMPT,
         messages=[
             {

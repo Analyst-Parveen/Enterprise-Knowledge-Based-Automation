@@ -74,15 +74,23 @@ data "aws_cognito_user_pools" "main" {
   name = "${local.name}-users"
 }
 
+locals {
+  # One secret holds all three Razorpay values as JSON keys
+  # (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET / RAZORPAY_WEBHOOK_SECRET). It is
+  # created out of band like every other secret value here, so Terraform reads
+  # it and never owns it.
+  razorpay_secret_names = var.razorpay_secrets_enabled ? ["razorpay"] : []
+}
+
 data "aws_secretsmanager_secret" "app" {
-  for_each = toset([
+  for_each = toset(concat([
     "backend/database-url",
     "backend/qdrant-api-key",
     "backend/dev-auth-secret",
     "ai/langsmith-api-key",
     "ai/cohere-api-key",
     "ai/groq-api-key",
-  ])
+  ], local.razorpay_secret_names))
 
   name = "${var.project_code}/${var.environment}/${each.value}"
 }
@@ -152,13 +160,22 @@ module "service" {
     password_secret = "${data.aws_secretsmanager_secret.app["backend/database-url"].arn}:password::"
   }
 
-  secret_environment = {
-    DEV_AUTH_SECRET   = data.aws_secretsmanager_secret.app["backend/dev-auth-secret"].arn
-    QDRANT_API_KEY    = data.aws_secretsmanager_secret.app["backend/qdrant-api-key"].arn
-    LANGSMITH_API_KEY = data.aws_secretsmanager_secret.app["ai/langsmith-api-key"].arn
-    COHERE_API_KEY    = data.aws_secretsmanager_secret.app["ai/cohere-api-key"].arn
-    GROQ_API_KEY      = data.aws_secretsmanager_secret.app["ai/groq-api-key"].arn
-  }
+  secret_environment = merge(
+    {
+      DEV_AUTH_SECRET   = data.aws_secretsmanager_secret.app["backend/dev-auth-secret"].arn
+      QDRANT_API_KEY    = data.aws_secretsmanager_secret.app["backend/qdrant-api-key"].arn
+      LANGSMITH_API_KEY = data.aws_secretsmanager_secret.app["ai/langsmith-api-key"].arn
+      COHERE_API_KEY    = data.aws_secretsmanager_secret.app["ai/cohere-api-key"].arn
+      GROQ_API_KEY      = data.aws_secretsmanager_secret.app["ai/groq-api-key"].arn
+    },
+    # ECS resolves "<arn>:<json key>::" at task start, so one secret feeds all
+    # three variables and no value passes through Terraform state.
+    var.razorpay_secrets_enabled ? {
+      RAZORPAY_KEY_ID         = "${data.aws_secretsmanager_secret.app["razorpay"].arn}:RAZORPAY_KEY_ID::"
+      RAZORPAY_KEY_SECRET     = "${data.aws_secretsmanager_secret.app["razorpay"].arn}:RAZORPAY_KEY_SECRET::"
+      RAZORPAY_WEBHOOK_SECRET = "${data.aws_secretsmanager_secret.app["razorpay"].arn}:RAZORPAY_WEBHOOK_SECRET::"
+    } : {}
+  )
 
   # Non-secret configuration only. Anything sensitive goes through
   # secret_environment above so it never enters Terraform state.

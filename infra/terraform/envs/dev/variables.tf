@@ -202,6 +202,17 @@ variable "db_backup_retention_days" {
   default     = 1
 }
 
+variable "razorpay_secrets_enabled" {
+  description = <<-EOT
+    Inject the Razorpay key id, key secret and webhook secret into the task.
+    Leave false until the secret ekba/<env>/razorpay exists and holds the three
+    JSON keys RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET and RAZORPAY_WEBHOOK_SECRET.
+    ECS will not start a task whose secret or JSON key is missing.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "restore_snapshot_id" {
   description = <<-EOT
     Manual RDS snapshot to rebuild the database from when the instance is
