@@ -557,6 +557,24 @@ async def schedule_cancel(session: AsyncSession, ctx: RequestContext) -> None:
         raise UpstreamError("The payment service is unavailable.") from exc
 
 
+def payment_display_status(payment: PaymentTransaction) -> str:
+    """What the payment history should show.
+
+    ``status`` records what Razorpay said when the payment was captured and is
+    never rewritten, so a refunded payment would keep reading "captured". The
+    authoritative answer is the money: how much of this payment has come back.
+    Cumulative, so two partial refunds that together cover it read as a full
+    refund, and a refund that only failed leaves the payment exactly as it was.
+    """
+    total = payment.total_paise or 0
+    refunded = payment.refunded_paise or 0
+    if total <= 0 or refunded <= 0:
+        return payment.status
+    if refunded >= total:
+        return "refunded"
+    return "partially_refunded"
+
+
 async def list_payments(session: AsyncSession, tenant_id: str) -> list[PaymentTransaction]:
     stmt = (
         select(PaymentTransaction)

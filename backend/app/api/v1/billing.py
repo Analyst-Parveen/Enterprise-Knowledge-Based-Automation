@@ -166,7 +166,7 @@ async def payments(ctx: BillingUser, session: DbSession) -> list[PaymentOut]:
     return [
         PaymentOut(
             id=row.id,
-            status=row.status,
+            status=billing.payment_display_status(row),
             total_paise=row.total_paise,
             method=row.method,
             created_at=row.created_at.isoformat(),

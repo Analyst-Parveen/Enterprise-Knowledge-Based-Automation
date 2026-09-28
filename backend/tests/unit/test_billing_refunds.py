@@ -519,6 +519,107 @@ async def test_refund_missing_ids_is_ignored() -> None:
     assert sub.plan_id == "pro-monthly"
 
 
+# --- what the payment history shows --------------------------------------
+
+
+def _txn(total: int = 3611, refunded: int = 0, status: str = "captured") -> PaymentTransaction:
+    return PaymentTransaction(
+        id="p1",
+        tenant_id=TENANT,
+        razorpay_payment_id="pay_1",
+        status=status,
+        total_paise=total,
+        refunded_paise=refunded,
+    )
+
+
+def test_history_shows_captured_until_money_comes_back() -> None:
+    assert billing.payment_display_status(_txn()) == "captured"
+
+
+def test_history_shows_partially_refunded_part_way() -> None:
+    assert billing.payment_display_status(_txn(refunded=1000)) == "partially_refunded"
+
+
+def test_history_shows_refunded_once_the_payment_is_covered() -> None:
+    assert billing.payment_display_status(_txn(refunded=3611)) == "refunded"
+    # an over-refund (a rounding correction, say) still reads as refunded
+    assert billing.payment_display_status(_txn(refunded=4000)) == "refunded"
+
+
+def test_history_keeps_a_failed_payment_failed() -> None:
+    assert billing.payment_display_status(_txn(status="failed")) == "failed"
+
+
+def test_history_is_unmoved_by_a_failed_refund() -> None:
+    """refund.failed records a status but returns no money."""
+    txn = _txn(status="captured")
+    txn.refund_status = "failed"
+    assert billing.payment_display_status(txn) == "captured"
+
+
+def test_history_tolerates_rows_written_before_the_refund_columns_existed() -> None:
+    txn = _txn()
+    txn.refunded_paise = None  # type: ignore[assignment]
+    assert billing.payment_display_status(txn) == "captured"
+
+
+@pytest.mark.asyncio
+async def test_history_flips_to_refunded_after_a_full_refund_is_processed() -> None:
+    """End to end: the same event that restores the plan also changes what the
+    payment history shows."""
+    sub = _complimentary_sub()
+    store = _Store(sub)
+    await _activate(store)
+    assert billing.payment_display_status(store.payments[0]) == "captured"
+
+    await billing.apply_webhook(store, "evt_ref", _refund())
+
+    assert billing.payment_display_status(store.payments[0]) == "refunded"
+    assert sub.plan_id == "basic-monthly"  # restoration still works
+    assert sub.complimentary is True
+
+
+@pytest.mark.asyncio
+async def test_history_accumulates_partial_refunds_before_reading_refunded() -> None:
+    sub = _complimentary_sub()
+    store = _Store(sub)
+    await _activate(store)
+
+    await billing.apply_webhook(store, "evt_r1", _refund(refund_id="rfnd_1", amount=1611))
+    assert billing.payment_display_status(store.payments[0]) == "partially_refunded"
+
+    await billing.apply_webhook(store, "evt_r2", _refund(refund_id="rfnd_2", amount=2000))
+    assert billing.payment_display_status(store.payments[0]) == "refunded"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_refund_does_not_double_count_the_history() -> None:
+    sub = _complimentary_sub()
+    store = _Store(sub)
+    await _activate(store)
+
+    await billing.apply_webhook(store, "evt_r", _refund(amount=1611))
+    await billing.apply_webhook(store, "evt_r_again", _refund(amount=1611))
+
+    assert store.payments[0].refunded_paise == 1611
+    assert billing.payment_display_status(store.payments[0]) == "partially_refunded"
+
+
+@pytest.mark.asyncio
+async def test_renewal_refund_shows_refunded_without_touching_the_plan() -> None:
+    sub = _complimentary_sub()
+    store = _Store(sub)
+    await _activate(store, event_id="evt_1", payment_id="pay_1")
+    await _activate(store, event_id="evt_2", payment_id="pay_2")  # renewal
+
+    await billing.apply_webhook(store, "evt_ref", _refund(payment_id="pay_2"))
+
+    assert billing.payment_display_status(store.payments[1]) == "refunded"
+    assert billing.payment_display_status(store.payments[0]) == "captured"
+    assert sub.plan_id == "pro-monthly"  # no downgrade from a renewal refund
+
+
 def test_a_refund_event_never_passes_an_unverified_signature() -> None:
     """The refund path sits behind the same signature check as every other event."""
     body = b'{"event":"refund.processed"}'
