@@ -228,6 +228,25 @@ TASK_DEF_ARN="$(aws ecs describe-task-definition --task-definition "$APP_NAME" \
 
 APPSPEC="$(printf '{"version":0.0,"Resources":[{"TargetService":{"Type":"AWS::ECS::Service","Properties":{"TaskDefinition":"%s","LoadBalancerInfo":{"ContainerName":"api","ContainerPort":8000}}}}]}' "$TASK_DEF_ARN")"
 
+# CodeDeploy allows exactly one active deployment per deployment group. A second
+# deploy.sh run - or a re-run started before the previous blue-green finished its
+# wait and termination windows - otherwise dies with
+# DeploymentLimitExceededException while the first deployment is quietly
+# succeeding. Wait for the one in flight instead, the same way
+# deploy-frontend.sh waits for an Amplify build.
+ACTIVE_DEPLOY="$(aws deploy list-deployments \
+  --application-name "$APP_NAME" --deployment-group-name "${APP_NAME}-dg" \
+  --include-only-statuses Created Queued InProgress Baking Ready \
+  --query 'deployments[0]' --output text 2>/dev/null | tr -d '\r' || echo None)"
+if [ -n "$ACTIVE_DEPLOY" ] && [ "$ACTIVE_DEPLOY" != "None" ]; then
+  log "deployment ${ACTIVE_DEPLOY} is already in flight - waiting for it rather than starting a second one"
+  if aws deploy wait deployment-successful --deployment-id "$ACTIVE_DEPLOY"; then
+    ok "in-flight deployment ${ACTIVE_DEPLOY} succeeded"
+  else
+    warn "in-flight deployment ${ACTIVE_DEPLOY} did not succeed - continuing with a fresh deployment"
+  fi
+fi
+
 DEPLOY_ID="$(aws deploy create-deployment \
   --application-name "$APP_NAME" \
   --deployment-group-name "${APP_NAME}-dg" \

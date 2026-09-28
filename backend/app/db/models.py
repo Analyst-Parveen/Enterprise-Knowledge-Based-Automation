@@ -388,6 +388,16 @@ class TenantSubscription(Base, TimestampMixin):
     current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # The state this row held immediately before the Razorpay subscription named
+    # here activated it. A full refund of that activation restores exactly this,
+    # instead of guessing at "cancelled" or "free". It is written once per
+    # Razorpay subscription and never on a renewal, so it always describes the
+    # moment before THAT activation.
+    activation_razorpay_subscription_id: Mapped[str | None] = mapped_column(String(64))
+    activation_prev_plan_id: Mapped[str | None] = mapped_column(String(64))
+    activation_prev_status: Mapped[str | None] = mapped_column(String(32))
+    activation_prev_complimentary: Mapped[bool | None] = mapped_column(Boolean)
+
     plan: Mapped[SubscriptionPlan] = relationship()
 
 
@@ -420,6 +430,40 @@ class PaymentTransaction(Base, TimestampMixin):
     gateway_fee_paise: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_paise: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     method: Mapped[str | None] = mapped_column(String(40))
+
+    # Which Razorpay subscription this payment belongs to. The tenant holds one
+    # subscription row that later checkouts overwrite, so this is what tells a
+    # refund whether its payment belongs to the subscription in force today.
+    razorpay_subscription_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    # True only for the first payment of that Razorpay subscription. A renewal
+    # charge is refundable without undoing the plan the tenant is on.
+    is_activation: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Cumulative across every processed refund of this payment, so two partial
+    # refunds that together cover it count as a full refund.
+    refunded_paise: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    refund_status: Mapped[str | None] = mapped_column(String(32))
+
+    refunds: Mapped[list[PaymentRefund]] = relationship(back_populates="payment")
+
+
+class PaymentRefund(Base, TimestampMixin):
+    """One Razorpay refund. Keyed by the refund id so cumulative totals stay
+    exact no matter how often an event is redelivered or reordered."""
+
+    __tablename__ = "payment_refunds"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    payment_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("payment_transactions.id", ondelete="CASCADE"), nullable=False
+    )
+    razorpay_refund_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    amount_paise: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    payment: Mapped[PaymentTransaction] = relationship(back_populates="refunds")
 
 
 class BillingWebhookEvent(Base, TimestampMixin):

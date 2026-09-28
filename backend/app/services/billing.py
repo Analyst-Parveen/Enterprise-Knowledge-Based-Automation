@@ -29,6 +29,7 @@ from app.core.logging import get_logger
 from app.db.models import (
     BillingWebhookEvent,
     FeeRule,
+    PaymentRefund,
     PaymentTransaction,
     PlanEntitlement,
     SubscriptionPlan,
@@ -38,6 +39,14 @@ from app.db.models import (
 )
 
 logger = get_logger(__name__)
+
+# Razorpay refund events, mapped to the state we record. Only "processed" means
+# the money actually went back, so only it can change a subscription.
+_REFUND_STATUS = {
+    "refund.created": "created",
+    "refund.processed": "processed",
+    "refund.failed": "failed",
+}
 
 _ACTIVE = {SubscriptionStatus.ACTIVE}
 _RAZORPAY_STATUS = {
@@ -318,6 +327,16 @@ async def apply_webhook(session: AsyncSession, event_id: str, event: dict[str, A
     payload = event.get("payload") or {}
     subscription = ((payload.get("subscription") or {}).get("entity")) or {}
     payment = ((payload.get("payment") or {}).get("entity")) or {}
+    refund = ((payload.get("refund") or {}).get("entity")) or {}
+
+    # A refund carries no subscription entity, so it takes its own path: it is
+    # resolved from the refunded payment, never from "whatever this tenant is on
+    # now". Falling through to the code below would silently do nothing.
+    if refund or event_type in _REFUND_STATUS:
+        await _apply_refund(session, event_type, refund, payment)
+        row.processed = True
+        return True
+
     notes = subscription.get("notes") or payment.get("notes") or {}
     tenant_id = notes.get("tenant_id")
     razorpay_sub_id = subscription.get("id")
@@ -340,6 +359,15 @@ async def apply_webhook(session: AsyncSession, event_id: str, event: dict[str, A
             mapped = None
         if mapped is not None:
             if mapped == SubscriptionStatus.ACTIVE:
+                # Stamp what this row held just before this Razorpay subscription
+                # took it over, once per subscription. Guarding on the id means a
+                # redelivered activation, a second activating event, and every
+                # later renewal all leave the original snapshot intact.
+                if razorpay_sub_id and sub.activation_razorpay_subscription_id != razorpay_sub_id:
+                    sub.activation_razorpay_subscription_id = razorpay_sub_id
+                    sub.activation_prev_plan_id = sub.plan_id
+                    sub.activation_prev_status = sub.status.value
+                    sub.activation_prev_complimentary = sub.complimentary
                 plan_from_notes = notes.get("plan_id")
                 if isinstance(plan_from_notes, str) and plan_from_notes:
                     sub.plan_id = plan_from_notes
@@ -360,11 +388,25 @@ async def apply_webhook(session: AsyncSession, event_id: str, event: dict[str, A
             )
         ).scalar_one_or_none()
         if already is None:
+            # The first payment recorded against a Razorpay subscription is the
+            # one that activated it; everything after is a renewal charge, and
+            # refunding a renewal must not undo the plan the tenant is on.
+            prior = None
+            if razorpay_sub_id:
+                prior = (
+                    await session.execute(
+                        select(PaymentTransaction)
+                        .where(PaymentTransaction.razorpay_subscription_id == razorpay_sub_id)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
             session.add(
                 PaymentTransaction(
                     tenant_id=sub.tenant_id,
                     subscription_id=sub.id,
                     razorpay_payment_id=str(payment_id),
+                    razorpay_subscription_id=razorpay_sub_id or None,
+                    is_activation=prior is None,
                     status=str(payment.get("status") or event_type),
                     total_paise=int(payment.get("amount") or 0),
                     method=str(payment.get("method") or "") or None,
@@ -372,6 +414,122 @@ async def apply_webhook(session: AsyncSession, event_id: str, event: dict[str, A
             )
     row.processed = True
     return True
+
+
+async def _apply_refund(
+    session: AsyncSession,
+    event_type: str,
+    refund: dict[str, Any],
+    payment: dict[str, Any],
+) -> None:
+    """Record one Razorpay refund and, only when it completes the activating
+    payment of the subscription still in force, restore the state that payment
+    replaced.
+
+    Everything here is driven from the refunded payment outwards - refund ->
+    payment -> subscription -> tenant - so a refund of an old or unrelated
+    payment can never reach into whatever the tenant is on today.
+    """
+    status = _REFUND_STATUS.get(event_type)
+    if status is None:
+        # Only created/processed/failed are acted on. Anything else carrying a
+        # refund entity - refund.speed_changed, say - reports how the money is
+        # travelling, not whether it moved, so it changes nothing here.
+        logger.info("razorpay_refund_event_ignored", extra={"extra": {"event": event_type}})
+        return
+
+    refund_id = str(refund.get("id") or "")
+    original_payment_id = str(refund.get("payment_id") or payment.get("id") or "")
+    if not refund_id or not original_payment_id:
+        logger.warning("razorpay_refund_missing_ids", extra={"extra": {"event": event_type}})
+        return
+
+    txn = (
+        await session.execute(
+            select(PaymentTransaction).where(
+                PaymentTransaction.razorpay_payment_id == original_payment_id
+            )
+        )
+    ).scalar_one_or_none()
+    if not isinstance(txn, PaymentTransaction):
+        # A payment this system never recorded: another integration, or one made
+        # before payments were stored. Nothing is invented for it.
+        logger.info("razorpay_refund_unknown_payment", extra={"extra": {"event": event_type}})
+        return
+
+    amount = int(refund.get("amount") or 0)
+
+    existing = (
+        await session.execute(
+            select(PaymentRefund).where(PaymentRefund.razorpay_refund_id == refund_id)
+        )
+    ).scalar_one_or_none()
+
+    if not isinstance(existing, PaymentRefund):
+        existing = PaymentRefund(
+            tenant_id=txn.tenant_id,
+            payment_id=txn.id,
+            razorpay_refund_id=refund_id,
+            amount_paise=amount,
+            status=status,
+        )
+        session.add(existing)
+        await session.flush()
+        newly_processed = status == "processed"
+    else:
+        # "processed" is terminal: a late or reordered created/failed event for a
+        # refund already counted must never walk it back or add its money twice.
+        newly_processed = status == "processed" and existing.status != "processed"
+        if existing.status != "processed":
+            existing.status = status
+            if amount:
+                existing.amount_paise = amount
+
+    txn.refund_status = status
+    if not newly_processed:
+        return
+
+    # Column defaults only land at INSERT, so a payment recorded earlier in this
+    # same transaction still reads None here.
+    txn.refunded_paise = (txn.refunded_paise or 0) + (existing.amount_paise or 0)
+
+    if txn.total_paise <= 0 or txn.refunded_paise < txn.total_paise:
+        return  # partial refund: the money is recorded, the plan is untouched
+    if not txn.is_activation:
+        return  # a renewal was refunded; it never bought the current plan
+
+    sub = await load_subscription(session, txn.tenant_id)
+    if not isinstance(sub, TenantSubscription):
+        return
+    # The subscription in force must still be the one this payment activated,
+    # and its snapshot must still belong to that same Razorpay subscription.
+    # Either check failing means a newer subscription has taken over.
+    if not txn.razorpay_subscription_id:
+        return
+    if sub.razorpay_subscription_id != txn.razorpay_subscription_id:
+        return
+    if sub.activation_razorpay_subscription_id != txn.razorpay_subscription_id:
+        return
+    if sub.activation_prev_plan_id is None:
+        return  # activated before snapshots existed; reconcile by hand instead
+
+    sub.plan_id = sub.activation_prev_plan_id
+    if sub.activation_prev_status:
+        try:
+            sub.status = SubscriptionStatus(sub.activation_prev_status)
+        except ValueError:  # pragma: no cover - only a hand-edited row reaches this
+            logger.warning("razorpay_refund_unknown_prev_status")
+    sub.complimentary = bool(sub.activation_prev_complimentary)
+    # The snapshot has been spent. Clearing it makes a second restore impossible
+    # even if a further refund event arrives for the same subscription.
+    sub.activation_razorpay_subscription_id = None
+    sub.activation_prev_plan_id = None
+    sub.activation_prev_status = None
+    sub.activation_prev_complimentary = None
+    logger.info(
+        "razorpay_refund_restored_previous_plan",
+        extra={"extra": {"tenant_id": sub.tenant_id, "plan_id": sub.plan_id}},
+    )
 
 
 async def schedule_cancel(session: AsyncSession, ctx: RequestContext) -> None:
