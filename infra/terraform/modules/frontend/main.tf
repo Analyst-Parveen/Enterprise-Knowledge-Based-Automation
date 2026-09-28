@@ -159,14 +159,20 @@ resource "aws_amplify_app" "this" {
             key = "Content-Security-Policy"
             value = join("; ", [
               "default-src 'self'",
-              "script-src 'self' 'unsafe-inline'",
+              # Razorpay Checkout loads its script from checkout.razorpay.com and
+              # renders the payment form in an iframe served by api.razorpay.com.
+              # Without these the script never loads, window.Razorpay stays
+              # undefined and the billing page reports a failed payment after the
+              # subscription has already been created at Razorpay.
+              "script-src 'self' 'unsafe-inline' https://checkout.razorpay.com",
               "style-src 'self' 'unsafe-inline'",
-              "img-src 'self' data:",
+              "img-src 'self' data: https://cdn.razorpay.com",
               "font-src 'self' data:",
-              "connect-src 'self' ${local.api_url}",
+              "connect-src 'self' ${local.api_url} https://api.razorpay.com https://lumberjack.razorpay.com",
+              "frame-src https://api.razorpay.com https://checkout.razorpay.com",
               "frame-ancestors 'none'",
               "base-uri 'self'",
-              "form-action 'self'",
+              "form-action 'self' https://api.razorpay.com",
               "object-src 'none'",
             ])
           },

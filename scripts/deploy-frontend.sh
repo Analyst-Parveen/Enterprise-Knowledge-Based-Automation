@@ -456,6 +456,21 @@ HEADERS="$(curl -s -D - -o /dev/null --max-time 20 "${SITE_URL}/" | tr -d '\r' |
 printf '%s' "$HEADERS" | grep -qi '^strict-transport-security:' && record ok "HSTS header present" || record fail "HSTS header present"
 printf '%s' "$HEADERS" | grep -qi '^content-security-policy:.*connect-src' && record ok "CSP header present" || record fail "CSP header present"
 
+# Amplify serves customHeaders from the DEPLOYED build, not from the app
+# configuration, so applying a header change without rebuilding leaves the old
+# headers live. That silently cost a debugging cycle once: the Razorpay CSP
+# origins were applied but never served, so Checkout stayed blocked.
+CONFIGURED_CSP="$(aws amplify get-app --app-id "$APP_ID" --query 'app.customHeaders' --output text 2>/dev/null   | tr ',' '
+' | grep -o '"value":"default-src[^"]*"' | head -1 | sed 's/^"value":"//; s/"$//')"
+SERVED_CSP="$(printf '%s' "$HEADERS" | grep -i '^content-security-policy:' | head -1   | sed 's/^[Cc]ontent-[Ss]ecurity-[Pp]olicy:[[:space:]]*//')"
+if [ -z "$CONFIGURED_CSP" ]; then
+  record ok "served CSP matches the Amplify configuration (no configured CSP to compare)"
+elif [ "$CONFIGURED_CSP" = "$SERVED_CSP" ]; then
+  record ok "served CSP matches the Amplify configuration"
+else
+  record fail "served CSP matches the Amplify configuration"     "the live build predates the current header configuration - rerun with --rebuild"
+fi
+
 REDIRECT="$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 20 "http://${SITE_URL#https://}/" || true)"
 case "$REDIRECT" in 30[12378]\ https://*) record ok "HTTP redirects to HTTPS" ;; *) record fail "HTTP redirects to HTTPS" "got: ${REDIRECT}" ;; esac
 

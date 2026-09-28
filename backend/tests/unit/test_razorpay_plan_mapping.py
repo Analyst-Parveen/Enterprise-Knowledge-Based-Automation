@@ -133,3 +133,76 @@ def test_quote_matches_what_razorpay_charges(
             f"{plan_id}: quote {total} paise but Razorpay charges "
             f"{RAZORPAY_CHARGE_PAISE[plan_id]} paise"
         )
+
+
+# --- migration 0007: the LIVE-mode plan IDs ----------------------------------
+
+
+@pytest.fixture(scope="module")
+def live_migration() -> ModuleType:
+    return _load("0007_razorpay_live_plans.py")
+
+
+def test_live_revision_chain(live_migration: ModuleType) -> None:
+    assert live_migration.revision == "0007"
+    assert live_migration.down_revision == "0006"
+
+
+def test_live_targets_exactly_the_seeded_plans(
+    live_migration: ModuleType, seed_migration: ModuleType
+) -> None:
+    """The same six ids 0003 inserted - no new plan, none left behind."""
+    seeded = {row[0] for row in seed_migration._PLANS}
+    assert set(live_migration.LIVE_PLAN_IDS) == seeded
+    assert set(live_migration.TEST_PLAN_IDS) == seeded
+
+
+def test_live_ids_are_distinct_and_well_formed(live_migration: ModuleType) -> None:
+    ids = list(live_migration.LIVE_PLAN_IDS.values())
+    assert len(set(ids)) == len(ids), "two plans share one Razorpay plan ID"
+    for razorpay_id in ids:
+        assert razorpay_id.startswith("plan_")
+        # Razorpay entity ids carry exactly 14 characters after the prefix; a
+        # different length means a mis-transcribed ID, which cost a cycle once.
+        assert len(razorpay_id) == len("plan_") + 14, razorpay_id
+
+
+def test_live_ids_verified_against_the_live_account(live_migration: ModuleType) -> None:
+    """Pinned from a read of the LIVE Razorpay account with the LIVE key."""
+    assert live_migration.LIVE_PLAN_IDS == {
+        "basic-monthly": "plan_ThO2saW6lrwf3H",
+        "basic-yearly": "plan_ThO69Sw6Ziys5g",
+        "pro-monthly": "plan_ThO6gd0L5YJiZ4",
+        "pro-yearly": "plan_ThO75Q8o15Q9mh",
+        "enterprise-monthly": "plan_ThOgNwQywQRnF4",
+        "enterprise-yearly": "plan_ThO7zyfLE0IkIe",
+    }
+
+
+def test_live_switch_does_not_touch_prices(live_migration: ModuleType) -> None:
+    """0007 maps IDs only - no amount column appears in its statement."""
+    assert "base_amount_paise" not in live_migration._UPDATE.text
+
+
+def test_downgrade_restores_the_test_mode_links(
+    live_migration: ModuleType, mapping_migration: ModuleType
+) -> None:
+    expected = {plan: rid for plan, (_amount, rid) in mapping_migration.TEST_PLAN_MAPPING.items()}
+    assert live_migration.TEST_PLAN_IDS == expected
+
+
+def test_live_plan_amounts_still_match_the_quote(
+    mapping_migration: ModuleType, fee_alignment: dict[str, int]
+) -> None:
+    """The LIVE plans were created at these amounts, so quote == charge holds."""
+    from app.services import billing
+
+    for plan_id, (base_paise, _) in mapping_migration.TEST_PLAN_MAPPING.items():
+        *_, total = billing.quote_amount(
+            base_paise,
+            saas_gst_bps=fee_alignment["saas_gst_bps"],
+            platform_fee_bps=fee_alignment["domestic_platform_fee_bps"],
+            gst_on_fee_bps=fee_alignment["gst_on_platform_fee_bps"],
+            customer_pays_gateway_fee=bool(fee_alignment["customer_pays_gateway_fee"]),
+        )
+        assert total == RAZORPAY_CHARGE_PAISE[plan_id]

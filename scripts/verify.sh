@@ -20,6 +20,76 @@ check() {
 
 skip() { warn "SKIP $1 ${2:+- $2}"; }
 
+# Diagnostic lines for the report. A bare "FAIL" tells the next reader nothing,
+# which is how a blocked security group came to be read as a broken application.
+DIAGS=""
+note_diag() { DIAGS="${DIAGS}${1}
+"; }
+
+# An HTTP check that records WHY it failed. The distinction that matters: a curl
+# transport error means the endpoint never answered at all (a network path
+# problem), while an HTTP status means the application answered and reported
+# itself unhealthy. Those need opposite investigations.
+http_check() {
+  local name="$1" url="$2" timeout="$3"
+  local tmp status rc why body
+  tmp="$(mktemp)"
+  rc=0
+  status="$(curl -sS --max-time "$timeout" -o "$tmp" -w '%{http_code}' "$url" 2>/dev/null)" || rc=$?
+
+  if [ "$rc" -eq 0 ] && [ "${status:-000}" -ge 200 ] && [ "${status:-000}" -lt 300 ]; then
+    ok "$name"
+    PASS=$((PASS+1))
+    note_diag "- OK \`${url}\` -> HTTP ${status}"
+  elif [ "$rc" -ne 0 ]; then
+    case "$rc" in
+      28) why="no answer within ${timeout}s (connection timed out)" ;;
+      7)  why="connection refused" ;;
+      6)  why="could not resolve host" ;;
+      *)  why="curl transport error (exit ${rc})" ;;
+    esac
+    err "$name - ${why}"
+    FAIL=$((FAIL+1))
+    note_diag "- FAIL \`${url}\` -> ${why}"
+    note_diag "  Nothing answered, so this is a NETWORK PATH failure - ALB allow-list,"
+    note_diag "  wrong URL, or no running stack. It is NOT evidence of an unhealthy app."
+  else
+    body="$(head -c 300 "$tmp" | tr -d '\r\n')"
+    err "$name - HTTP ${status}"
+    FAIL=$((FAIL+1))
+    note_diag "- FAIL \`${url}\` -> HTTP ${status}"
+    note_diag "  body: \`${body:-(empty)}\`"
+  fi
+  rm -f "$tmp"
+}
+
+# The ALB admits a single operator /32. A changed home IP makes every HTTP check
+# time out while the deployment is perfectly healthy, so report that up front
+# instead of leaving it to be rediagnosed from scratch.
+operator_ip_note() {
+  local sg_name="${PROJECT_CODE}-${ENVIRONMENT}-alb" allowed mine
+  allowed="$(aws ec2 describe-security-groups --filters "Name=group-name,Values=${sg_name}" \
+      --query 'SecurityGroups[0].IpPermissions[].IpRanges[].CidrIp' --output text 2>/dev/null \
+      | tr -d '\r' | tr '\t' '\n' | sort -u | tr '\n' ' ')" || return 0
+  [ -n "$allowed" ] && [ "$allowed" != "None" ] || return 0
+  mine="$(curl -fsS --max-time 10 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]')" || return 0
+  [ -n "$mine" ] || return 0
+
+  case " $allowed " in
+    *" ${mine}/32 "*)
+      ok "operator IP ${mine} is in the ALB allow-list"
+      note_diag "- OK operator IP \`${mine}\` is admitted by \`${sg_name}\`"
+      ;;
+    *)
+      warn "operator IP ${mine} is NOT in the ALB allow-list (allows: ${allowed})"
+      note_diag "- WARNING operator IP \`${mine}\` is NOT admitted by \`${sg_name}\` (allows: \`${allowed}\`)"
+      note_diag "  Every HTTP check below will time out until \`allowed_cidrs\` in"
+      note_diag "  \`infra/terraform/envs/${ENVIRONMENT}/terraform.tfvars\` names this IP"
+      note_diag "  and the stack is re-applied. The deployment itself may be healthy."
+      ;;
+  esac
+}
+
 AWS_MODE=0
 
 # RDS is not publicly accessible and its storage is encrypted.
@@ -55,6 +125,9 @@ if [ "${VERIFY_AWS:-1}" = "1" ] && command -v aws >/dev/null 2>&1 \
   preflight_aws
   AWS_MODE=1
 
+  step "Operator access"
+  operator_ip_note
+
   step "Resource ownership (ProjectCode=${PROJECT_CODE})"
   aws resourcegroupstaggingapi get-resources \
       --tag-filters "Key=ProjectCode,Values=${PROJECT_CODE}" \
@@ -82,8 +155,8 @@ step "Services"
 if command -v curl >/dev/null 2>&1; then
   # /health/ready runs SELECT 1 on PostgreSQL and pings Redis and Qdrant; any
   # failure turns it into a 503. On AWS this is the backend -> RDS check.
-  check "readiness: PostgreSQL + Redis + Qdrant (${API_URL}/api/v1/health/ready)" \
-    curl -fsS --max-time 15 "${API_URL}/api/v1/health/ready" || true
+  http_check "readiness: PostgreSQL + Redis + Qdrant (${API_URL}/api/v1/health/ready)" \
+    "${API_URL}/api/v1/health/ready" 15 || true
 else
   skip "readiness endpoint" "curl unavailable"
 fi
@@ -101,7 +174,7 @@ fi
 # ---------------------------------------------------------------------------
 step "Application"
 if command -v curl >/dev/null 2>&1; then
-  check "health endpoint (${API_URL}/api/v1/health)" curl -fsS --max-time 10 "${API_URL}/api/v1/health" || true
+  http_check "health endpoint (${API_URL}/api/v1/health)" "${API_URL}/api/v1/health" 10 || true
 else
   skip "health endpoint" "curl unavailable"
 fi
@@ -143,6 +216,9 @@ report_header "$REPORT" "Verification Report"
 {
   printf '## Summary\n\n- Passed: %s\n- Failed: %s\n\n' "$PASS" "$FAIL"
   printf 'Verification is read-only. No resources were modified.\n\n'
+  if [ -n "$DIAGS" ]; then
+    printf '## Endpoint diagnostics\n\n%s\n' "$DIAGS"
+  fi
   printf '## Note\n\nMany checks are placeholders until the corresponding phase lands.\n'
 } >> "$REPORT"
 
