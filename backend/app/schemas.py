@@ -168,6 +168,36 @@ class TenantOut(ORMModel):
     user_count: int = 0
     active_user_count: int = 0
     admin_count: int = 0
+    # Subscription and month-to-date usage, filled in by the route from the
+    # control plane's aggregated queries. None when a company has no
+    # subscription row at all.
+    billing: TenantBillingOut | None = None
+
+
+class TenantBillingOut(BaseModel):
+    """A company's account state, for the platform operator's registry view.
+
+    Billing facts only. There is deliberately nothing here that describes what
+    a company has stored - no document, conversation or message counts - so the
+    control plane keeps its "registry data only" contract.
+    """
+
+    plan_id: str
+    plan_name: str
+    interval: str
+    status: str
+    complimentary: bool
+    cancel_at_period_end: bool = False
+    current_period_end: datetime | None = None
+    base_amount_paise: int = 0
+    # tokens_used is committed + reserved: the same sum quota enforcement
+    # compares against the limit, so the console and the gate never disagree.
+    # The two parts are kept alongside it so in-flight work stays visible.
+    tokens_used: int = 0
+    committed_tokens: int = 0
+    reserved_tokens: int = 0
+    token_limit: int | None = None
+    requests: int = 0
 
 
 class TenantListResponse(BaseModel):

@@ -176,8 +176,10 @@ function TenantRegistry() {
             <thead>
               <tr>
                 <Th>Company</Th>
-                <Th>Tenant id</Th>
                 <Th>Status</Th>
+                <Th>Plan</Th>
+                <Th>Subscription</Th>
+                <Th>AI usage this month</Th>
                 <Th>Admins</Th>
                 <Th>Users</Th>
                 <Th>Onboarded</Th>
@@ -197,6 +199,49 @@ function TenantRegistry() {
           </Table>
         )}
       </Card>
+    </div>
+  );
+}
+
+/** A subscription status reads green only when it is actually paying. */
+function subscriptionTone(status: string): "ok" | "warn" | "danger" | "neutral" {
+  const value = status.toLowerCase();
+  if (value === "active") return "ok";
+  if (value === "past_due" || value === "halted" || value === "incomplete") return "warn";
+  if (value === "cancelled" || value === "expired") return "danger";
+  return "neutral";
+}
+
+/** Tokens used against the plan's monthly allowance, with a bar once known. */
+function UsageCell({ billing }: { billing: TenantOut["billing"] }) {
+  if (!billing) return <span className="text-muted">&mdash;</span>;
+  const used = billing.tokens_used;
+  const limit = billing.token_limit;
+  if (limit === null || limit <= 0) {
+    return (
+      <span className="tabular-nums text-fg">
+        {used.toLocaleString()}
+        <span className="block text-xs text-muted">no limit recorded</span>
+      </span>
+    );
+  }
+  const pct = Math.min(100, Math.round((used / limit) * 100));
+  const tone = pct >= 100 ? "bg-danger" : pct >= 80 ? "bg-warn" : "bg-brand";
+  return (
+    <div className="min-w-[8rem]">
+      <span className="tabular-nums text-fg">
+        {used.toLocaleString()} <span className="text-muted">/ {limit.toLocaleString()}</span>
+      </span>
+      <div
+        className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-border"
+        role="progressbar"
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label="AI tokens used this month"
+      >
+        <div className={`h-full ${tone}`} style={{ width: `${pct}%` }} />
+      </div>
     </div>
   );
 }
@@ -230,16 +275,47 @@ function TenantRow({
     <tr className={tenant.is_active ? undefined : "opacity-60"}>
       <Td>
         <span className="font-medium text-fg">{tenant.name}</span>
+        <span className="block font-mono text-xs text-muted">{tenant.id}</span>
         {tenant.contact_email ? (
           <span className="block text-xs text-muted">{tenant.contact_email}</span>
         ) : null}
         {error ? <span className="block text-xs text-danger">{error}</span> : null}
       </Td>
-      <Td className="font-mono text-xs">{tenant.id}</Td>
       <Td>
         <Badge tone={tenant.is_active ? "ok" : "warn"}>
           {tenant.is_active ? "Active" : "Suspended"}
         </Badge>
+      </Td>
+      <Td>
+        {tenant.billing ? (
+          <>
+            <span className="font-medium text-fg">{tenant.billing.plan_name}</span>
+            <span className="block text-xs text-muted">
+              billed {tenant.billing.interval}
+              {tenant.billing.complimentary ? " · complimentary" : ""}
+            </span>
+          </>
+        ) : (
+          <span className="text-muted">&mdash;</span>
+        )}
+      </Td>
+      <Td>
+        {tenant.billing ? (
+          <>
+            <Badge tone={subscriptionTone(tenant.billing.status)}>{tenant.billing.status}</Badge>
+            {tenant.billing.current_period_end ? (
+              <span className="block text-xs text-muted">
+                {tenant.billing.cancel_at_period_end ? "ends" : "renews"}{" "}
+                {new Date(tenant.billing.current_period_end).toLocaleDateString()}
+              </span>
+            ) : null}
+          </>
+        ) : (
+          <span className="text-muted">no subscription</span>
+        )}
+      </Td>
+      <Td>
+        <UsageCell billing={tenant.billing} />
       </Td>
       <Td>
         {tenant.admin_count > 0 ? (

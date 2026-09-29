@@ -94,6 +94,29 @@ export interface TenantOut {
   user_count: number;
   active_user_count: number;
   admin_count: number;
+  /**
+   * The company's account state. Billing facts only - the control plane
+   * deliberately carries nothing describing what a company has stored.
+   * Null when the company has no subscription row at all.
+   */
+  billing: TenantBilling | null;
+}
+
+export interface TenantBilling {
+  plan_id: string;
+  plan_name: string;
+  interval: string;
+  status: string;
+  complimentary: boolean;
+  cancel_at_period_end: boolean;
+  current_period_end: string | null;
+  base_amount_paise: number;
+  /** Committed + reserved: the same sum quota enforcement compares to the limit. */
+  tokens_used: number;
+  committed_tokens: number;
+  reserved_tokens: number;
+  token_limit: number | null;
+  requests: number;
 }
 
 export interface TenantList {

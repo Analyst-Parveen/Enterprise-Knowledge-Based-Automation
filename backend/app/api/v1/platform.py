@@ -14,6 +14,8 @@ See .claude/rules/tenant-isolation.md section 2.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Query, status
 
 from app.api.deps import DbSession, PlatformAdminUser
@@ -26,6 +28,7 @@ from app.schemas import (
     AuditEventOut,
     InviteResponse,
     TenantAdminInviteRequest,
+    TenantBillingOut,
     TenantCreateRequest,
     TenantListResponse,
     TenantOut,
@@ -40,13 +43,54 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/platform", tags=["platform"])
 
 
-def _with_counts(tenant: object, counts: dict[str, dict[str, int]]) -> TenantOut:
+def _with_counts(
+    tenant: object,
+    counts: dict[str, dict[str, int]],
+    billing: dict[str, dict[str, Any]] | None = None,
+    usage: dict[str, dict[str, int]] | None = None,
+    limits: dict[str, int] | None = None,
+) -> TenantOut:
     out = TenantOut.model_validate(tenant)
     seats = counts.get(out.id, {})
     out.user_count = seats.get("users", 0)
     out.active_user_count = seats.get("active_users", 0)
     out.admin_count = seats.get("admins", 0)
+
+    row = (billing or {}).get(out.id)
+    if row is not None:
+        used = (usage or {}).get(out.id, {})
+        out.billing = TenantBillingOut(
+            plan_id=row["plan_id"],
+            plan_name=row["plan_name"],
+            interval=row["interval"],
+            status=row["status"],
+            complimentary=row["complimentary"],
+            cancel_at_period_end=row["cancel_at_period_end"],
+            current_period_end=row["current_period_end"],
+            base_amount_paise=row["base_amount_paise"],
+            tokens_used=used.get("used", 0),
+            committed_tokens=used.get("committed_tokens", 0),
+            reserved_tokens=used.get("reserved_tokens", 0),
+            requests=used.get("request_count", 0),
+            token_limit=(limits or {}).get(row["plan_id"]),
+        )
     return out
+
+
+async def _registry_facts(
+    session: DbSession,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, int], dict[str, int]]:
+    """The four aggregated lookups a registry view needs.
+
+    Four grouped queries for the whole page rather than four per company, so
+    the operator console stays cheap as companies are added.
+    """
+    return (
+        await cp.tenant_user_counts(session),
+        await cp.tenant_billing_summaries(session),
+        await cp.tenant_token_usage(session),
+        await cp.plan_token_limits(session),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -92,16 +136,16 @@ async def create_tenant(
 @router.get("/tenants", response_model=TenantListResponse)
 async def list_tenants(ctx: PlatformAdminUser, session: DbSession) -> TenantListResponse:
     tenants = await cp.list_tenants(session)
-    counts = await cp.tenant_user_counts(session)
-    items = [_with_counts(t, counts) for t in tenants]
+    counts, billing, usage, limits = await _registry_facts(session)
+    items = [_with_counts(t, counts, billing, usage, limits) for t in tenants]
     return TenantListResponse(items=items, total=len(items))
 
 
 @router.get("/tenants/{tenant_id}", response_model=TenantOut)
 async def get_tenant(tenant_id: str, ctx: PlatformAdminUser, session: DbSession) -> TenantOut:
     tenant = await cp.get_tenant(session, tenant_id)
-    counts = await cp.tenant_user_counts(session)
-    return _with_counts(tenant, counts)
+    counts, billing, usage, limits = await _registry_facts(session)
+    return _with_counts(tenant, counts, billing, usage, limits)
 
 
 @router.patch("/tenants/{tenant_id}", response_model=TenantOut)

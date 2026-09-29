@@ -10,9 +10,11 @@ import {
   ClipboardList,
   Clock,
   Coins,
+  CreditCard,
   Database,
   FileText,
   Gauge,
+  Gift,
   Image as ImageIcon,
   Layers,
   MessageSquareText,
@@ -117,6 +119,16 @@ function PlatformHome() {
   const items = tenants.data?.items ?? [];
   const unfinished = items.filter((t) => t.admin_count === 0);
   const seats = items.reduce((sum, t) => sum + t.user_count, 0);
+  // Account state, from the registry the platform already owns. Paying means a
+  // live subscription somebody is actually billed for; complimentary grants are
+  // counted apart so the two are never confused.
+  const paying = items.filter((t) => t.billing?.status === "active" && !t.billing.complimentary);
+  const complimentary = items.filter((t) => t.billing?.complimentary);
+  const nearQuota = items.filter((t) => {
+    const b = t.billing;
+    if (!b || !b.token_limit) return false;
+    return b.tokens_used / b.token_limit >= 0.8;
+  });
   const recent = trail.data ?? [];
 
   return (
@@ -216,6 +228,45 @@ function PlatformHome() {
               tone={unfinished.length ? "warn" : undefined}
             />
             <Stat label="Seats provisioned" value={seats} icon={ShieldCheck} iconTone="violet" />
+          </>
+        )}
+      </section>
+
+      <section aria-label="Subscriptions" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        {tenants.loading ? (
+          Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-[108px]" />)
+        ) : tenants.error ? null : (
+          <>
+            <Stat
+              label="Paid subscriptions"
+              value={paying.length}
+              hint={
+                paying.length
+                  ? "companies on a plan they are billed for"
+                  : "no company is on a paid plan yet"
+              }
+              icon={CreditCard}
+              iconTone="accent"
+            />
+            <Stat
+              label="Complimentary"
+              value={complimentary.length}
+              hint="on a granted plan, not billed"
+              icon={Gift}
+              iconTone="violet"
+            />
+            <Stat
+              label="Near their AI quota"
+              value={nearQuota.length}
+              hint={
+                nearQuota.length
+                  ? "at 80% or more of this month's tokens"
+                  : "every company is inside its allowance"
+              }
+              icon={Gauge}
+              iconTone={nearQuota.length ? "warn" : "accent"}
+              tone={nearQuota.length ? "warn" : undefined}
+            />
           </>
         )}
       </section>
