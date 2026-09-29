@@ -23,6 +23,7 @@ from app.core.config import settings
 from app.core.context import RequestContext
 from app.core.exceptions import UpstreamError
 from app.core.logging import get_logger, log_security_event
+from app.services.security.document_access import DocumentScope
 
 logger = get_logger(__name__)
 
@@ -190,6 +191,7 @@ def _tenant_filter(
     *,
     document_ids: list[str] | None = None,
     department: str | None = None,
+    scope: DocumentScope | None = None,
     include_suspicious: bool = False,
 ) -> qm.Filter:
     must: list[qm.Condition] = [
@@ -197,7 +199,14 @@ def _tenant_filter(
     ]
     if document_ids:
         must.append(qm.FieldCondition(key="document_id", match=qm.MatchAny(any=document_ids)))
-    if department:
+    # The scope decides which departments are reachable and is resolved from the
+    # database, so it wins over any department the caller asked for. An admin
+    # scope adds no condition; a narrower one is an inescapable MatchAny.
+    if scope is not None and not scope.all_documents:
+        must.append(
+            qm.FieldCondition(key="department", match=qm.MatchAny(any=list(scope.departments)))
+        )
+    elif department:
         must.append(qm.FieldCondition(key="department", match=qm.MatchValue(value=department)))
 
     must_not: list[qm.Condition] = []
@@ -215,11 +224,21 @@ async def search(
     top_k: int | None = None,
     document_ids: list[str] | None = None,
     department: str | None = None,
+    scope: DocumentScope | None = None,
     score_threshold: float | None = None,
 ) -> list[SearchHit]:
-    """Tenant-filtered similarity search. The filter cannot be overridden."""
+    """Tenant- and scope-filtered similarity search.
+
+    Neither filter can be overridden by the caller. A scope that reaches no
+    department returns nothing without querying at all, so an unauthorised
+    question never touches the vector store.
+    """
+    if scope is not None and scope.sees_nothing:
+        return []
     limit = top_k or settings.retrieval_top_k
-    query_filter = _tenant_filter(ctx, document_ids=document_ids, department=department)
+    query_filter = _tenant_filter(
+        ctx, document_ids=document_ids, department=department, scope=scope
+    )
 
     def _search() -> list[Any]:
         # query_points, not the removed search(): qdrant-client dropped

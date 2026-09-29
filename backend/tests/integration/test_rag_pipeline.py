@@ -17,16 +17,34 @@ from app.services.rag import cache, pipeline
 from app.services.vector import SearchHit
 
 
-class FakeSession:
-    """Absorbs the repository writes the pipeline makes."""
+class _ScalarResult:
+    def __init__(self, value: object) -> None:
+        self._value = value
 
-    def __init__(self) -> None:
+    def scalar_one_or_none(self) -> object:
+        return self._value
+
+
+class FakeSession:
+    """Absorbs the repository writes the pipeline makes.
+
+    ``department`` is what the pipeline reads back to build the caller's
+    document scope. The default is an admin-free user in the HR department, so
+    these tests exercise the ordinary authorised path; a test that wants the
+    unauthorised path sets it to None.
+    """
+
+    def __init__(self, department: str | None = "hr") -> None:
         self.usage: list[dict] = []
         self.audits: list[dict] = []
+        self.department = department
 
     def add(self, _obj: object) -> None: ...
     async def flush(self) -> None: ...
     async def commit(self) -> None: ...
+
+    async def execute(self, _stmt: object) -> _ScalarResult:
+        return _ScalarResult(self.department)
 
 
 def make_hits(tenant: str = "tenant-a") -> list[SearchHit]:

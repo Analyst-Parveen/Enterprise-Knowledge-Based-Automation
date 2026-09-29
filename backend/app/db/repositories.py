@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import false as sa_false
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +36,8 @@ from app.db.models import (
     UserFeedback,
     UserRole,
 )
+from app.services.security import document_access
+from app.services.security.document_access import DocumentScope
 
 
 # ---------------------------------------------------------------------------
@@ -78,25 +81,87 @@ async def record_audit(
 # ---------------------------------------------------------------------------
 # documents
 # ---------------------------------------------------------------------------
+def _apply_document_scope(stmt: Any, scope: DocumentScope | None) -> Any:
+    """Narrow a document query to what the caller may reach.
+
+    ``None`` means the caller did not resolve a scope - used by internal
+    callers such as the ingestion worker, which is not acting for a user.
+    """
+    if scope is None or scope.all_documents:
+        return stmt
+    if scope.sees_nothing:
+        # An unassigned user, or a department outside the caller's scope.
+        return stmt.where(sa_false())
+    return stmt.where(Document.department.in_(scope.departments))
+
+
 async def get_document(
-    session: AsyncSession, ctx: RequestContext, document_id: str
+    session: AsyncSession,
+    ctx: RequestContext,
+    document_id: str,
+    *,
+    scope: DocumentScope | None = None,
 ) -> Document | None:
-    """Tenant-filtered fetch. A document in another tenant is simply not found."""
+    """Tenant-filtered fetch. A document in another tenant is simply not found.
+
+    With a scope, a document of another department inside the same company is
+    equally "not found" - the caller learns nothing it could not already reach,
+    so guessing an id reveals neither the document nor its existence.
+    """
     stmt = select(Document).where(
         Document.id == document_id,
         Document.tenant_id == ctx.tenant_id,
         Document.status != DocumentStatus.DELETED,
     )
+    stmt = _apply_document_scope(stmt, scope)
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def require_document(
-    session: AsyncSession, ctx: RequestContext, document_id: str
+    session: AsyncSession,
+    ctx: RequestContext,
+    document_id: str,
+    *,
+    enforce_scope: bool = True,
 ) -> Document:
-    doc = await get_document(session, ctx, document_id)
+    """Fetch a document the caller is allowed to reach, or refuse.
+
+    The scope is resolved here rather than in each route, so detail, status,
+    download and delete cannot drift apart. Internal callers that act for no
+    user - the ingestion worker - pass ``enforce_scope=False``.
+    """
+    scope = await document_access.scope_for(session, ctx) if enforce_scope else None
+    doc = await get_document(session, ctx, document_id, scope=scope)
     if doc is None:
-        # Distinguish "does not exist" from "belongs to another tenant" in the
-        # AUDIT LOG only - never in the response.
+        # Distinguish "does not exist" from "belongs to another tenant" or
+        # "another department" in the AUDIT LOG only - never in the response,
+        # which stays identical so an id cannot be probed for existence.
+        if scope is not None and not scope.all_documents:
+            in_tenant = (
+                await session.execute(
+                    select(Document.id).where(
+                        Document.id == document_id,
+                        Document.tenant_id == ctx.tenant_id,
+                    )
+                )
+            ).first() is not None
+            if in_tenant:
+                log_security_event(
+                    "document.department_access_denied",
+                    reason="document_outside_caller_department",
+                    severity="warning",
+                    document_id=document_id,
+                )
+                await record_audit(
+                    session,
+                    event_type="document.department_access_denied",
+                    ctx=ctx,
+                    severity="warning",
+                    resource_type="document",
+                    resource_id=document_id,
+                    reason="document_outside_caller_department",
+                )
+                raise TenantIsolationError()
         exists_elsewhere = (
             await session.execute(select(Document.id).where(Document.id == document_id))
         ).first() is not None
@@ -127,13 +192,22 @@ async def list_documents(
     limit: int = 50,
     offset: int = 0,
     department: str | None = None,
+    scope: DocumentScope | None = None,
 ) -> tuple[Sequence[Document], int]:
+    """List the caller's documents.
+
+    ``department`` is the caller's own choice of filter and only ever narrows
+    what ``scope`` already allows; ``scope`` is what decides access.
+    """
     base = select(Document).where(
         Document.tenant_id == ctx.tenant_id,
         Document.status != DocumentStatus.DELETED,
     )
-    if department:
+    if scope is not None:
+        scope = scope.narrowed_to(department)
+    elif department:
         base = base.where(Document.department == department)
+    base = _apply_document_scope(base, scope)
 
     total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
 

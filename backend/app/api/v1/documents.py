@@ -24,7 +24,7 @@ from app.schemas import (
 from app.services import storage, vector
 from app.services.ingestion.pipeline import ingest_document
 from app.services.rag import cache
-from app.services.security import files
+from app.services.security import document_access, files
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -152,12 +152,16 @@ async def list_documents(
     offset: int = Query(default=0, ge=0),
     department: Department | None = Query(default=None),
 ) -> DocumentListResponse:
+    # The scope decides what this caller may see; the department query
+    # parameter is only their own filter on top of it.
+    scope = await document_access.scope_for(session, ctx)
     rows, total = await repo.list_documents(
         session,
         ctx,
         limit=limit,
         offset=offset,
         department=department.value if department else None,
+        scope=scope,
     )
     return DocumentListResponse(
         items=[DocumentOut.model_validate(r) for r in rows],

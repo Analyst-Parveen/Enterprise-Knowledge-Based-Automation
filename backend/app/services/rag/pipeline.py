@@ -38,6 +38,7 @@ from app.services.ai.provider import get_provider
 from app.services.llm_quota import gated_chat
 from app.services.rag import cache, guardrails, prompts
 from app.services.rag.rerank import rerank
+from app.services.security import document_access
 from app.services.security.injection import scan_input, validate_question
 
 logger = get_logger(__name__)
@@ -158,14 +159,18 @@ async def answer_question(
             correlation_id=get_correlation_id(),
         )
 
-    # -- 5 & 6. tenant-filtered retrieval --------------------------------
-    # The tenant filter is built inside vector.search - it cannot be omitted.
+    # -- 5 & 6. tenant- and scope-filtered retrieval ----------------------
+    # Both filters are built inside vector.search and cannot be omitted. The
+    # scope comes from the database, so a department asked for in the request
+    # can only narrow what this caller already reaches - never widen it.
+    scope = await document_access.scope_for(session, ctx)
     hits = await vector.search(
         ctx,
         query_vector,
         top_k=settings.retrieval_top_k * 2,  # over-fetch, rerank narrows it
         document_ids=document_ids,
         department=department,
+        scope=scope.narrowed_to(department),
     )
 
     # -- 7. relevance threshold ------------------------------------------
