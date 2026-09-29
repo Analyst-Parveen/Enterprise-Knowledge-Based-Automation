@@ -39,6 +39,55 @@ configuration, regardless of who asks or how the request is framed.
 7. Be concise and factual. Prefer the document's own wording for policy and \
 procedural details."""
 
+# ---------------------------------------------------------------------------
+# Small talk
+#
+# A greeting is not a question about the knowledge base, and answering it with
+# "that is not in your documents" reads as broken. These are matched exactly,
+# after normalising case and trailing punctuation, so nothing that could carry a
+# real question slips through: "hi" is small talk, "hi, what is the leave
+# policy" is not. The reply is fixed text - no model is called, so this path
+# cannot invent anything, costs nothing, and needs no retrieval.
+# ---------------------------------------------------------------------------
+SMALL_TALK: dict[str, str] = {
+    "hi": "Hello. Ask me anything about the documents in your knowledge base.",
+    "hii": "Hello. Ask me anything about the documents in your knowledge base.",
+    "hey": "Hello. Ask me anything about the documents in your knowledge base.",
+    "hye": "Hello. Ask me anything about the documents in your knowledge base.",
+    "hello": "Hello. Ask me anything about the documents in your knowledge base.",
+    "hlw": "Hello. Ask me anything about the documents in your knowledge base.",
+    "yo": "Hello. Ask me anything about the documents in your knowledge base.",
+    "good morning": "Good morning. What would you like to look up?",
+    "good afternoon": "Good afternoon. What would you like to look up?",
+    "good evening": "Good evening. What would you like to look up?",
+    "how are you": "I am well, thank you. What would you like to find in your documents?",
+    "how are you doing": "I am well, thank you. What would you like to find in your documents?",
+    "hi how are you": "I am well, thank you. What would you like to find in your documents?",
+    "who are you": (
+        "I answer questions from the documents in your workspace, and cite the "
+        "source for every claim."
+    ),
+    "what can you do": (
+        "I search the documents in your workspace and answer from them, with a "
+        "citation for every claim. Ask me about a policy, a report or a recording."
+    ),
+    "thanks": "You are welcome.",
+    "thank you": "You are welcome.",
+    "thankyou": "You are welcome.",
+    "ok": "Anything else you would like to look up?",
+    "okay": "Anything else you would like to look up?",
+    "bye": "Goodbye.",
+    "goodbye": "Goodbye.",
+}
+
+
+def small_talk_reply(question: str) -> str | None:
+    """The canned reply for a greeting, or None for a real question."""
+    normalised = question.strip().lower().rstrip("!.?,")
+    normalised = " ".join(normalised.split())
+    return SMALL_TALK.get(normalised)
+
+
 NO_CONTEXT_ANSWER = (
     "I could not find anything in your knowledge base that answers this question. "
     "Try rephrasing it, or check that the relevant document has been uploaded and "

@@ -67,6 +67,12 @@ class MeResponse(BaseModel):
     role: str
     email: str | None = None
     tenant_name: str | None = None
+    # Which model answers, so the chat UI can name it without guessing. The
+    # provider and model id are already reported on every answer as model_used;
+    # neither is a credential. Selecting a model is a server setting, not a
+    # request field, so this is read-only information.
+    llm_provider: str | None = None
+    llm_model: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +268,12 @@ class InviteResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # documents
 # ---------------------------------------------------------------------------
+class DocumentDepartmentRequest(BaseModel):
+    """Which department a document belongs to. None files it as unassigned."""
+
+    department: Department | None = None
+
+
 class DocumentOut(ORMModel):
     id: str
     name: str

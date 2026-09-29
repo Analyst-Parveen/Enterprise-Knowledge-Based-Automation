@@ -417,6 +417,13 @@ export const api = {
 
     status: (id: string) => request<IngestionJob>(`/api/v1/documents/${id}/status`),
 
+    /** File a document under a department. Company admin only, enforced server-side. */
+    setDepartment: (id: string, department: Department | null) =>
+      request<DocumentOut>(`/api/v1/documents/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ department }),
+      }),
+
     upload: (file: File, department?: Department) => {
       const form = new FormData();
       form.append("file", file);

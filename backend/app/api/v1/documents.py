@@ -16,6 +16,7 @@ from app.db.models import Department, Document, IngestionJob
 from app.db.session import get_sessionmaker
 from app.schemas import (
     DeleteResponse,
+    DocumentDepartmentRequest,
     DocumentListResponse,
     DocumentOut,
     IngestionJobOut,
@@ -175,6 +176,29 @@ async def list_documents(
 async def get_document(ctx: RateLimitedUser, session: DbSession, document_id: str) -> DocumentOut:
     # Raises TenantIsolationError (as 403/not-found) for another tenant's document.
     document = await repo.require_document(session, ctx, document_id)
+    return DocumentOut.model_validate(document)
+
+
+@router.patch("/{document_id}", response_model=DocumentOut)
+async def set_document_department(
+    ctx: RateLimitedUser,
+    session: DbSession,
+    document_id: str,
+    payload: DocumentDepartmentRequest,
+) -> DocumentOut:
+    """File a document under a department. Company admin only, always audited.
+
+    Filing is what decides who can reach a document, so an existing file can be
+    moved into the right department without re-uploading it - and a document
+    left unfiled stays administrative until an admin files it.
+    """
+    document = await repo.set_document_department(session, ctx, document_id, payload.department)
+    await session.commit()
+    # The department is part of the retrieval filter, so the chunks already in
+    # the vector store have to move with the row.
+    await vector.set_document_department(
+        ctx, document_id, payload.department.value if payload.department else None
+    )
     return DocumentOut.model_validate(document)
 
 

@@ -98,6 +98,26 @@ async def answer_question(
     # -- 2. input validation ---------------------------------------------
     question = validate_question(question)
 
+    # -- 2a. small talk ---------------------------------------------------
+    # A greeting is not a question about the knowledge base. Answering it with
+    # "that is not in your documents" reads as broken, so an exact match on a
+    # short pleasantry gets a fixed reply: no retrieval, no model call, no
+    # citations, nothing invented. Anything longer than a bare greeting falls
+    # through to the grounded path below unchanged.
+    canned = prompts.small_talk_reply(question)
+    if canned is not None:
+        return ChatResponse(
+            answer=canned,
+            model_used="none",
+            input_tokens=0,
+            output_tokens=0,
+            estimated_cost=0.0,
+            latency_ms=elapsed_ms(),
+            tenant_id=ctx.tenant_id,
+            confidence=1.0,
+            correlation_id=get_correlation_id(),
+        )
+
     # -- 3. prompt injection scan ----------------------------------------
     scan = scan_input(question)
     if scan.is_blocking:

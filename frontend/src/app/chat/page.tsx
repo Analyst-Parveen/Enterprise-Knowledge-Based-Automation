@@ -1,8 +1,9 @@
 "use client";
 
+import { Markdown } from "@/components/markdown";
 import * as React from "react";
 
-import { PageHeader } from "@/components/shell";
+import { PageHeader, useSession } from "@/components/shell";
 import {
   Badge,
   Button,
@@ -94,9 +95,7 @@ export default function ChatPage() {
               </CardHeader>
               <CardBody className="space-y-4">
                 {/* Model output rendered as TEXT, never as HTML. */}
-                <p className="whitespace-pre-wrap text-sm leading-relaxed text-fg">
-                  {turn.response.answer}
-                </p>
+                <Markdown>{turn.response.answer}</Markdown>
                 <SpeakControls text={turn.response.answer} />
 
                 {turn.response.citations.length > 0 ? (
@@ -175,9 +174,7 @@ export default function ChatPage() {
                   disabled={busy}
                 />
                 <div className="flex flex-wrap items-center gap-2">
-                  <Select aria-label="Model" className="w-auto" value="groq" disabled>
-                    <option value="groq">Groq · openai/gpt-oss-20b</option>
-                  </Select>
+                  <ModelSelect />
                   <Select
                     aria-label="Department filter"
                     className="w-auto"
@@ -319,5 +316,53 @@ function VoiceInput({ onTranscript }: { onTranscript: (text: string) => void }) 
     >
       {listening ? "Stop" : "Speak"}
     </Button>
+  );
+}
+
+
+/**
+ * Which model answers, and which others the deployment knows about.
+ *
+ * The dropdown opens and lists every provider so it is clear what the platform
+ * supports, but only the configured one is selectable: the provider is a server
+ * setting, not a request field, and the backend would ignore a model a client
+ * asked for. Marking the rest unavailable is honest about that rather than
+ * offering a choice that silently does nothing.
+ *
+ * A native select keeps keyboard navigation, outside-click dismissal and the
+ * mobile picker for free, and cannot be clipped by a parent's overflow.
+ */
+const KNOWN_PROVIDERS: { id: string; label: string }[] = [
+  { id: "groq", label: "Groq" },
+  { id: "bedrock", label: "Amazon Bedrock" },
+  { id: "local", label: "Local / Ollama" },
+];
+
+function ModelSelect() {
+  const { me } = useSession();
+  const active = me?.llm_provider ?? "groq";
+  const model = me?.llm_model;
+
+  return (
+    <Select
+      aria-label="Model in use"
+      title="The model is configured on the server and cannot be changed from here."
+      className="w-auto"
+      value={active}
+      onChange={() => {
+        /* read-only: the server decides the provider */
+      }}
+    >
+      {KNOWN_PROVIDERS.map((p) => {
+        const isActive = p.id === active;
+        return (
+          <option key={p.id} value={p.id} disabled={!isActive}>
+            {isActive
+              ? `✓ ${p.label}${model ? ` · ${model}` : ""} — active`
+              : `${p.label} — not configured`}
+          </option>
+        );
+      })}
+    </Select>
   );
 }

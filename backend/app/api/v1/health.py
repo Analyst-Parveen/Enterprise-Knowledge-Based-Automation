@@ -88,4 +88,6 @@ async def me(ctx: CurrentUser, session: DbSession) -> MeResponse:
         role=ctx.role,
         email=ctx.email,
         tenant_name=tenant_name,
+        llm_provider=settings.llm_provider,
+        llm_model=settings.llm_model,
     )

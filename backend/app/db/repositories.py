@@ -19,7 +19,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import RequestContext, get_correlation_id
-from app.core.exceptions import NotFoundError, TenantIsolationError
+from app.core.exceptions import AuthorizationError, NotFoundError, TenantIsolationError
 from app.core.logging import log_security_event
 from app.db.models import (
     AuditEvent,
@@ -221,6 +221,59 @@ async def list_documents(
         .all()
     )
     return rows, int(total)
+
+
+async def set_document_department(
+    session: AsyncSession,
+    ctx: RequestContext,
+    document_id: str,
+    department: Department | None,
+) -> Document:
+    """File a document under a department. Company admin only, always audited.
+
+    Filing decides who can reach a document, so it is an admin action rather
+    than something an uploader can do to their own file - a user must not be
+    able to move a document into, or out of, a department they do not belong to.
+
+    The lookup runs with admin scope because that is what the caller is; an
+    admin already reaches every document in its own company, and the tenant
+    filter still applies.
+    """
+    if not ctx.is_admin:
+        log_security_event(
+            "authz.unauthorized_document_filing",
+            reason="not_admin",
+            severity="error",
+            document_id=document_id,
+        )
+        await record_audit(
+            session,
+            event_type="authz.unauthorized_document_filing",
+            ctx=ctx,
+            severity="error",
+            resource_type="document",
+            resource_id=document_id,
+            reason="not_admin",
+        )
+        raise AuthorizationError("Only a company admin can change a document's department.")
+
+    doc = await require_document(session, ctx, document_id)
+    previous = doc.department.value if doc.department else None
+    doc.department = department
+    await session.flush()
+
+    await record_audit(
+        session,
+        event_type="document.department_changed",
+        ctx=ctx,
+        severity="info",
+        resource_type="document",
+        resource_id=document_id,
+        reason="admin_filed_document",
+        previous_department=previous,
+        new_department=department.value if department else None,
+    )
+    return doc
 
 
 async def soft_delete_document(

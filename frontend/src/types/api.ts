@@ -57,6 +57,9 @@ export interface Me {
   role: Role;
   email: string | null;
   tenant_name?: string | null;
+  /** Which model answers. Read-only: the provider is a server setting. */
+  llm_provider?: string | null;
+  llm_model?: string | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { PageHeader } from "@/components/shell";
+import { PageHeader, useSession } from "@/components/shell";
 import {
   Badge,
   Button,
@@ -21,7 +21,7 @@ import {
 } from "@/components/ui";
 import { useAsync } from "@/hooks/useAsync";
 import { api } from "@/lib/api";
-import { DEPARTMENTS, type Department } from "@/types/api";
+import { DEPARTMENTS, type Department, type DocumentOut } from "@/types/api";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -35,6 +35,8 @@ export default function DocumentsPage() {
     () => api.documents.list({ limit: 100, department: filter || undefined }),
     [filter],
   );
+  const { me } = useSession();
+  const isAdmin = me?.role === "admin";
 
   const [file, setFile] = React.useState<File | null>(null);
   const [uploadDept, setUploadDept] = React.useState<Department | "">("");
@@ -179,7 +181,13 @@ export default function DocumentsPage() {
                 <tr key={doc.id}>
                   <Td className="max-w-[20rem] truncate">{doc.name}</Td>
                   <Td className="text-muted">{doc.modality}</Td>
-                  <Td className="capitalize text-muted">{doc.department ?? "—"}</Td>
+                  <Td>
+                    {isAdmin ? (
+                      <DepartmentCell doc={doc} onChanged={docs.reload} />
+                    ) : (
+                      <span className="capitalize text-muted">{doc.department ?? "—"}</span>
+                    )}
+                  </Td>
                   <Td>
                     <Badge tone={statusTone(doc.status)}>{doc.status}</Badge>
                   </Td>
@@ -204,5 +212,55 @@ export default function DocumentsPage() {
         )}
       </Card>
     </>
+  );
+}
+
+
+/**
+ * A document's department, editable by a company admin.
+ *
+ * Filing is what decides who can reach a document, so an unfiled file stays
+ * administrative until an admin puts it somewhere. Changing it here moves the
+ * database row and its chunks together - the server does both - so retrieval
+ * and the document list never disagree.
+ */
+function DepartmentCell({ doc, onChanged }: { doc: DocumentOut; onChanged: () => void }) {
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  async function change(value: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.documents.setDepartment(doc.id, (value || null) as Department | null);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not change the department.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="min-w-[9rem]">
+      <Select
+        aria-label={`Department for ${doc.name}`}
+        className="w-auto capitalize"
+        value={doc.department ?? ""}
+        disabled={busy}
+        onChange={(e) => void change(e.target.value)}
+      >
+        <option value="">Unassigned</option>
+        {DEPARTMENTS.map((d) => (
+          <option key={d} value={d}>
+            {d}
+          </option>
+        ))}
+      </Select>
+      {doc.department === null ? (
+        <span className="mt-1 block text-xs text-muted">only admins can see this</span>
+      ) : null}
+      {error ? <span className="mt-1 block text-xs text-danger">{error}</span> : null}
+    </div>
   );
 }

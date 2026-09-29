@@ -281,6 +281,40 @@ async def search(
     return clean
 
 
+async def set_document_department(
+    ctx: RequestContext, document_id: str, department: str | None
+) -> None:
+    """Move a document's chunks to a department - scoped to the caller's tenant.
+
+    The department lives in the chunk payload because that is what the
+    retrieval filter reads. Re-filing a document in the database alone would
+    leave its chunks answering for the old department, so the two move together.
+    """
+    selector = qm.Filter(
+        must=[
+            qm.FieldCondition(key="tenant_id", match=qm.MatchValue(value=ctx.tenant_id)),
+            qm.FieldCondition(key="document_id", match=qm.MatchValue(value=document_id)),
+        ]
+    )
+
+    def _apply() -> None:
+        get_client().set_payload(
+            collection_name=settings.qdrant_collection,
+            payload={"department": department},
+            points=selector,
+            wait=True,
+        )
+
+    try:
+        await asyncio.to_thread(_apply)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "qdrant_set_department_failed",
+            extra={"extra": {"error": type(exc).__name__, "document_id": document_id}},
+        )
+        raise UpstreamError("The vector store is unavailable.") from exc
+
+
 async def delete_document_chunks(ctx: RequestContext, document_id: str) -> None:
     """Remove every chunk of a document - scoped to the caller's tenant."""
     selector = qm.FilterSelector(
