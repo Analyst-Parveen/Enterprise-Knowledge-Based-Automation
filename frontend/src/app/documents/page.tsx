@@ -92,21 +92,28 @@ export default function DocumentsPage() {
                 accept=".pdf,.txt,.md,.doc,.docx,.csv,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.gif,.mp3,.wav,.m4a,.flac,.ogg,.mp4,.mov,.webm"
               />
             </div>
-            <div>
-              <Label htmlFor="dept">Department</Label>
-              <Select
-                id="dept"
-                value={uploadDept}
-                onChange={(e) => setUploadDept(e.target.value as Department | "")}
-              >
-                <option value="">Unassigned</option>
-                {DEPARTMENTS.map((d) => (
-                  <option key={d} value={d}>
-                    {d}
-                  </option>
-                ))}
-              </Select>
-            </div>
+            {/*
+              Only an admin chooses where a document is filed. A member's upload
+              goes to their own department, decided on the server, so offering
+              them a choice here would only be a control that does nothing.
+            */}
+            {isAdmin ? (
+              <div>
+                <Label htmlFor="dept">Department</Label>
+                <Select
+                  id="dept"
+                  value={uploadDept}
+                  onChange={(e) => setUploadDept(e.target.value as Department | "")}
+                >
+                  <option value="">Unassigned</option>
+                  {DEPARTMENTS.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            ) : null}
             <Button type="submit" disabled={!file || uploading}>
               {uploading ? "Uploading…" : "Upload"}
             </Button>

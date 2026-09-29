@@ -73,6 +73,13 @@ async def upload_document(
         files.verify_magic_bytes(ext, data[:32])
 
     # 4. key is derived from the verified tenant + a uuid, never the filename
+    # Which department the document lands in is authorization, not metadata, so
+    # only an admin may choose it. An ordinary member's upload is filed under
+    # the department they are in right now, whatever the form said - otherwise a
+    # member could file a document into a department they cannot read (losing
+    # their own upload) or into one they should not reach.
+    filed_under = await document_access.upload_department(session, ctx, department)
+
     key = files.build_storage_key(ctx.tenant_id, ext)
     source_uri = await storage.put_object(key, data, content_type)
 
@@ -84,7 +91,7 @@ async def upload_document(
         original_filename=files.sanitize_display_name(file.filename),
         content_type=content_type,
         modality=modality,
-        department=department,
+        department=filed_under,
         source_uri=source_uri,
         size_bytes=len(data),
         checksum_sha256=files.sha256_of(data),
